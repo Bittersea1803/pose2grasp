@@ -13,7 +13,7 @@ class DepthImageReceiver:
         try:
             cv_depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="16UC1")
         except CvBridgeError as e:
-            rospy.logerr("CvBridge greška: %s", e)
+            rospy.logerr("CvBridge error: %s", e)
             return
 
         cv_depth_normalized = cv2.normalize(cv_depth_image, None, 0, 255, cv2.NORM_MINMAX)

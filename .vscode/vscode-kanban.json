@@ -1,0 +1,20 @@
+{
+  "todo": [
+    {
+      "assignedTo": {
+        "name": "marijan"
+      },
+      "creation_time": "2025-03-14T14:08:05.563Z",
+      "description": {
+        "content": "First test with Random Forest, after that try XGBoost (complex)",
+        "mime": "text/markdown"
+      },
+      "id": "1",
+      "references": [],
+      "title": "Random Forest vs XGBoost"
+    }
+  ],
+  "in-progress": [],
+  "testing": [],
+  "done": []
+}

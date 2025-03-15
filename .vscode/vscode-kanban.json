@@ -16,5 +16,20 @@
   ],
   "in-progress": [],
   "testing": [],
-  "done": []
+  "done": [
+    {
+      "assignedTo": {
+        "name": "marijan"
+      },
+      "creation_time": "2025-03-15T20:03:21.832Z",
+      "description": {
+        "content": "xhost +local:root\n\n1s roscore\n2s roslaunch openii_launch\topenii.launch\n3s rosrun rqt_image_view rqt_image_view ",
+        "mime": "text/markdown"
+      },
+      "id": "2",
+      "references": [],
+      "title": "Run rosrun rqt_image_view rqt_image_view",
+      "type": "emergency"
+    }
+  ]
 }

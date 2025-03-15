@@ -33,7 +33,6 @@ RUN apt install -y python3-rosdep && rosdep init && rosdep update
 
 RUN apt-get install -y ros-noetic-openni-launch ros-noetic-openni2-launch ros-noetic-ros-numpy ros-noetic-rosbash
 
-# Postavljamo PYTHONPATH i radni direktorij prema novoj strukturi
 ENV PYTHONPATH="${PYTHONPATH}:/home/openpose_user/src/pose2grasp"
 WORKDIR /home/openpose_user/src/pose2grasp
 

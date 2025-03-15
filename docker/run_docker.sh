@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Omogući X11 pristup (ako već nije, npr. 'xhost +local:root')
 xhost +local:root 2>/dev/null
 
 docker rm pose2grasp_docker 2>/dev/null

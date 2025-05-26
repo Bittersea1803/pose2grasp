@@ -10,7 +10,6 @@ import torch
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
 import message_filters
-
 import joblib
 
 OPENPOSE_REPO = "/home/openpose_user/src/pose2grasp/src/pytorch-openpose"

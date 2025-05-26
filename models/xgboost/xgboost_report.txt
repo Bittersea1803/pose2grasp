@@ -1,0 +1,13 @@
+Accuracy on test set: 0.9389
+
+Classification Report:
+              precision    recall  f1-score   support
+
+       basic       0.96      1.00      0.98        44
+       pinch       0.96      0.90      0.93        29
+     scissor       0.93      0.93      0.93        27
+        wide       0.90      0.90      0.90        31
+
+    accuracy                           0.94       131
+   macro avg       0.94      0.93      0.93       131
+weighted avg       0.94      0.94      0.94       131

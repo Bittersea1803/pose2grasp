@@ -1,0 +1,209 @@
+# File: random_forest_trainer.py
+# English comments will be used as requested.
+
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.impute import SimpleImputer
+import numpy as np
+import os
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def get_project_root():
+    """Gets the absolute path to the project's root directory (pose2grasp/)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def load_data(project_root_dir, relative_csv_path="data/collected_hand_poses.csv"):
+    """
+    Loads hand pose data from a CSV file.
+    'project_root_dir' is the absolute path to the project's root.
+    'relative_csv_path' is the path from project_root_dir to the CSV.
+    """
+    csv_full_path = os.path.join(project_root_dir, relative_csv_path)
+    print(f"Attempting to load data from: {csv_full_path}")
+    try:
+        df = pd.read_csv(csv_full_path)
+        print(f"Data loaded successfully. Shape: {df.shape}")
+        return df
+    except FileNotFoundError:
+        print(f"Error: File not found at {csv_full_path}")
+        return None
+    except Exception as e:
+        print(f"An error occurred while loading data: {e}")
+        return None
+
+def preprocess_data_rf(df):
+    """
+    Preprocesses data for Random Forest training.
+    Handles label encoding and NaN imputation using SimpleImputer.
+    """
+    if df is None:
+        return None, None, None, None, None # Added None for imputer
+
+    df_processed = df.copy()
+    df_processed.dropna(subset=['label'], inplace=True)
+    if df_processed.empty:
+        print("Error: No data left after dropping rows with missing labels.")
+        return None, None, None, None, None
+
+    feature_columns = []
+    for i in range(21):
+        feature_columns.extend([f'x{i}_rel', f'y{i}_rel', f'z{i}_rel'])
+    
+    existing_feature_columns = [col for col in feature_columns if col in df_processed.columns]
+    
+    if not existing_feature_columns:
+        print("Error: No expected feature columns found.")
+        return None, None, None, None, None
+        
+    X = df_processed[existing_feature_columns].copy()
+    y_text = df_processed['label'].copy()
+
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y_text)
+    
+    print(f"Number of features (columns) used for X: {len(X.columns)}")
+    
+    imputer = SimpleImputer(missing_values=np.nan, strategy='median')
+    if X.isnull().sum().sum() > 0:
+        print(f"Info: Feature data contains {X.isnull().sum().sum()} NaN values. Applying SimpleImputer (median strategy).")
+        X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+    else:
+        print("Info: No NaN values found in features. Imputation not strictly needed but imputer is fitted.")
+        # Fit imputer even if no NaNs in training, for consistency if test set has NaNs
+        X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns) 
+        
+    return X_imputed, y_encoded, label_encoder, existing_feature_columns, imputer
+
+def save_results(model, label_encoder, imputer, y_true_test, y_pred_test, model_name_prefix, output_subdir):
+    """Saves the model, label encoder, imputer, classification report, and confusion matrix."""
+    os.makedirs(output_subdir, exist_ok=True)
+    
+    model_path = os.path.join(output_subdir, f"{model_name_prefix}_model.joblib")
+    joblib.dump(model, model_path)
+    print(f"Model saved to: {model_path}")
+
+    encoder_path = os.path.join(output_subdir, f"label_encoder_{model_name_prefix}.joblib")
+    joblib.dump(label_encoder, encoder_path)
+    print(f"LabelEncoder saved to: {encoder_path}")
+
+    if imputer: # Save imputer if it was used
+        imputer_path = os.path.join(output_subdir, f"imputer_{model_name_prefix}.joblib")
+        joblib.dump(imputer, imputer_path)
+        print(f"Imputer saved to: {imputer_path}")
+
+    report_str = classification_report(y_true_test, y_pred_test, target_names=label_encoder.classes_, zero_division=0)
+    accuracy = accuracy_score(y_true_test, y_pred_test)
+    
+    report_path = os.path.join(output_subdir, f"{model_name_prefix}_report.txt")
+    with open(report_path, 'w') as f:
+        f.write(f"Accuracy on test set: {accuracy:.4f}\n\n")
+        f.write("Classification Report:\n")
+        f.write(report_str)
+    print(f"Classification report saved to: {report_path}")
+
+    cm = confusion_matrix(y_true_test, y_pred_test, labels=np.arange(len(label_encoder.classes_)))
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=label_encoder.classes_, 
+                yticklabels=label_encoder.classes_)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title(f'Confusion Matrix - {model_name_prefix}')
+    cm_path = os.path.join(output_subdir, f"{model_name_prefix}_confusion_matrix.png")
+    plt.savefig(cm_path)
+    plt.close()
+    print(f"Confusion matrix plot saved to: {cm_path}")
+
+
+def tune_and_train_random_forest(X_train, y_train, X_test, y_test, feature_names, label_encoder, imputer, models_output_dir):
+    """
+    Tunes hyperparameters and trains the final Random Forest model.
+    Assumes X_train and X_test are already imputed.
+    Saves the model, encoder, imputer, and performance metrics.
+    """
+    print("\n--- Training and Tuning Random Forest ---")
+    output_subdir_rf = os.path.join(models_output_dir, "random_forest")
+
+    rf_clf = RandomForestClassifier(random_state=42)
+
+    # Expanded parameter grid
+    param_grid_rf = {
+        'n_estimators': [100, 200, 300, 400],
+        'max_depth': [None, 10, 20, 30],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4],
+        'class_weight': ['balanced', 'balanced_subsample', None] 
+    }
+    # For a quicker run:
+    # param_grid_rf_small = {
+    #     'n_estimators': [100, 150], 'max_depth': [10, 20],
+    #     'min_samples_split': [2, 5], 'min_samples_leaf': [1, 2]
+    # }
+
+
+    grid_search_rf = GridSearchCV(estimator=rf_clf, 
+                                  param_grid=param_grid_rf, # Use param_grid_rf_small for faster test
+                                  scoring='accuracy', 
+                                  cv=3, 
+                                  verbose=2,
+                                  n_jobs=-1) 
+
+    print("Starting GridSearchCV for Random Forest...")
+    grid_search_rf.fit(X_train, y_train) # X_train is already imputed
+
+    print("\nRandom Forest Hyperparameter tuning finished.")
+    print(f"Best Random Forest parameters: {grid_search_rf.best_params_}")
+    print(f"Best Random Forest cross-validation accuracy: {grid_search_rf.best_score_:.4f}")
+    
+    best_model = grid_search_rf.best_estimator_
+    
+    # Evaluate on test set (must also be imputed)
+    X_test_imputed = pd.DataFrame(imputer.transform(X_test), columns=feature_names)
+    y_pred_test = best_model.predict(X_test_imputed)
+    test_accuracy = accuracy_score(y_test, y_pred_test)
+
+    print(f"Random Forest Test Set Accuracy with best model: {test_accuracy:.4f}")
+
+    save_results(best_model, label_encoder, imputer, y_test, y_pred_test, "random_forest", output_subdir_rf)
+    
+    return best_model, test_accuracy
+
+def main():
+    """Main function to run the Random Forest training and tuning pipeline."""
+    project_root = get_project_root()
+    models_output_dir = os.path.join(project_root, "models")
+
+    print("--- Random Forest Training Pipeline Started ---")
+    df = load_data(project_root_dir=project_root)
+    if df is None:
+        return
+
+    # Note: preprocess_data_rf now also returns the imputer
+    X_imputed, y_encoded, label_encoder, feature_names, imputer = preprocess_data_rf(df)
+    if X_imputed is None:
+        return
+
+    # Split the imputed data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_imputed, y_encoded, test_size=0.25, random_state=42, stratify=y_encoded
+    )
+    
+    print(f"\nData split into training and testing sets (after imputation):")
+    print(f"Training set shape: X_train={X_train.shape}, y_train={y_train.shape}")
+    print(f"Test set shape: X_test={X_test.shape}, y_test={y_test.shape}")
+    if label_encoder:
+        print(f"Classes: {list(label_encoder.classes_)}")
+
+    # Pass the fitted imputer to the training function so it can be used on the test set there
+    # and also saved.
+    tune_and_train_random_forest(X_train, y_train, X_test, y_test, feature_names, label_encoder, imputer, models_output_dir)
+    
+    print("\n--- Random Forest Training Pipeline Finished ---")
+
+if __name__ == "__main__":
+    main()

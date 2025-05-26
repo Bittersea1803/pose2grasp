@@ -1,0 +1,18 @@
+camera_name: kinect_v1_1414_calibrated_on_camera_rgb_image_color
+image_width: 640
+image_height: 480
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [348.1861672614445, 0.0, 293.25038640559535, 0.0, 355.46105950836306, 283.35283409220494,
+    0.0, 0.0, 1.0]
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.4515415545616016, -0.7599611648716391, 0.059315378315387385, 0.028868810392050935,
+    0.32352221330559455]
+distortion_model: plumb_bob
+ros_topic_calibrated: /camera/rgb/image_color
+chessboard_pattern: {rows: 6, cols: 9}
+square_size_m: 0.024
+reprojection_error: 0.7136017316815059

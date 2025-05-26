@@ -1,16 +1,12 @@
-# File: scripts/data_collect.py
-# Refactored to remove external YAML calibration and raw image undistortion.
-# All comments and user-facing text are in English.
-
 import os
 import sys
-import time # Keep for potential future use, though not directly used now
+import time 
 import queue
 import threading
 import csv
 from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass, field
-# import yaml # YAML is no longer needed as we removed external calibration file loading
+# import yaml
 import datetime
 
 import cv2
@@ -71,16 +67,16 @@ except ImportError as e_pkg:
 
 
 # --- Configuration Constants ---
-RGB_TOPIC_RAW = "/camera/rgb/image_color" # Kept for selection, but undistortion is removed
-RGB_TOPIC_RECT_COLOR = "/camera/rgb/image_rect_color" # Recommended by user
-RGB_SOURCE_SELECTION_DEFAULT = "rect_color" # Defaulting to rectified color
+RGB_TOPIC_RAW = "/camera/rgb/image_color"
+RGB_TOPIC_RECT_COLOR = "/camera/rgb/image_rect_color"
+RGB_SOURCE_SELECTION_DEFAULT = "rect_color"
 RGB_TOPIC_OPTIONS = {
     "Rectified Color (`image_rect_color`)": RGB_TOPIC_RECT_COLOR,
     "Raw Color (`image_color`)": RGB_TOPIC_RAW 
 }
 
 REGISTERED_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
-CAMERA_INFO_TOPIC = "/camera/rgb/camera_info" # This will be the sole source of intrinsics
+CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
 
 CSV_FILENAME = "collected_hand_poses.csv" 
 CSV_FULL_PATH = os.path.join(DATA_DIR, CSV_FILENAME)
@@ -93,7 +89,7 @@ DEPTH_NEIGHBORHOOD_SIZE = 3
 DEPTH_STD_DEV_THRESHOLD_MM = 35.0
 OUTLIER_XYZ_THRESHOLD_M = 0.5
 MEDIAN_FILTER_KERNEL_SIZE = 3
-POSE_LABELS = ["basic", "wide", "pinch", "scissor", "other"] # "other" is a useful catch-all
+POSE_LABELS = ["basic", "wide", "pinch", "scissor"]
 MESSAGE_FILTER_SLOP = 0.1
 OVERLAY_ALPHA = 0.5
 OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
@@ -118,7 +114,7 @@ VALID_POINT_COLOR = (0, 255, 0); INVALID_POINT_COLOR = (0, 0, 255)
 class PendingCaptureMetadata:
     timestamp: Optional[str] = None
     rgb_source_topic: str = ""
-    calibration_used: bool = False # Will always be False now
+    calibration_used: bool = False
     median_filter_applied: bool = False
     openpose_conf_threshold_value: float = OPENPOSE_CONFIDENCE_THRESHOLD
     num_2d_peaks_detected_raw: int = 0
@@ -161,8 +157,8 @@ class DepthHandCollector:
         self._cx_topic: Optional[float] = None; self._cy_topic: Optional[float] = None
         self._camera_info_topic_received = False
 
-        self.current_rgb_topic_to_subscribe = RGB_TOPIC_RECT_COLOR # User preference
-        if RGB_SOURCE_SELECTION_DEFAULT.lower() == "raw": # Allow override if default is raw
+        self.current_rgb_topic_to_subscribe = RGB_TOPIC_RECT_COLOR
+        if RGB_SOURCE_SELECTION_DEFAULT.lower() == "raw":
              self.current_rgb_topic_to_subscribe = RGB_TOPIC_RAW
         
         default_dropdown_key = ""
@@ -174,18 +170,17 @@ class DepthHandCollector:
 
         self._initialize_openpose_estimator()
         self._initialize_data_storage_vars()
-        # _load_calibration_data_from_file() is REMOVED
         self._initialize_csv_file()
         self._load_existing_label_counts()
-        self._setup_gui_layout_widgets() # GUI setup will not include calibration checkbox
+        self._setup_gui_layout_widgets()
         self._initialize_ros_topic_subscriptions()
 
         self._waiting_for_label_input = False
 
         for i, label_text_key in enumerate(POSE_LABELS):
             key_char_bind = str(i + 1)
-            if label_text_key.lower() == "other": # Special key for "other"
-                if "o" not in [str(j+1) for j in range(len(POSE_LABELS)) if j != i]: # Avoid conflict if 'o' is already 10th+
+            if label_text_key.lower() == "other":
+                if "o" not in [str(j+1) for j in range(len(POSE_LABELS)) if j != i]:
                     key_char_bind = "o"
             self.root.bind(f"<KeyPress-{key_char_bind.lower()}>", lambda event, idx=i: self._handle_label_key_press(idx))
             if key_char_bind.isalpha():
@@ -201,7 +196,7 @@ class DepthHandCollector:
         rospy.loginfo("DepthHandCollector fully initialized (No external calibration).")
 
 
-    def _initialize_openpose_estimator(self): # (Identical to previous version)
+    def _initialize_openpose_estimator(self):
         try:
             openpose_model_file = os.path.join(OPENPOSE_MODEL_DIR, "hand_pose_model.pth")
             if not os.path.exists(openpose_model_file):
@@ -215,12 +210,12 @@ class DepthHandCollector:
             messagebox.showerror("Fatal Error", f"Failed to initialize OpenPose: {e}", parent=parent_window)
             sys.exit(1)
 
-    def _initialize_data_storage_vars(self): # (Identical to previous version)
+    def _initialize_data_storage_vars(self):
         self._latest_synced_data: Dict[str, Any] = {"rgb": None, "depth": None, "stamp": None, "info_msg": None}
         self._data_access_lock = threading.Lock() 
         self._pending_capture_data_instance = CaptureData() 
 
-    def _load_existing_label_counts(self): # (Identical to previous version)
+    def _load_existing_label_counts(self):
         self._label_counts: Dict[str, int] = {label: 0 for label in POSE_LABELS}
         if os.path.exists(CSV_FULL_PATH) and os.path.getsize(CSV_FULL_PATH) > 0:
             try:
@@ -250,7 +245,7 @@ class DepthHandCollector:
         if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, '_update_label_counts_gui_display'):
             self._gui_queue.put(GuiTask("update_label_counts_display", None))
 
-    def _initialize_csv_file(self): # (Minor change: calibration_used column description might be less relevant)
+    def _initialize_csv_file(self):
         try:
             csv_dir = os.path.dirname(CSV_FULL_PATH)
             if not os.path.exists(csv_dir): os.makedirs(csv_dir)
@@ -282,7 +277,7 @@ class DepthHandCollector:
             self._update_gui_status_message(f"FATAL ERROR: CSV Init: {e_gen}")
 
 
-    def _setup_gui_layout_widgets(self): # REMOVED CALIBRATION CHECKBOX
+    def _setup_gui_layout_widgets(self):
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         top_section_frame = ttk.Frame(main_frame)
@@ -334,7 +329,6 @@ class DepthHandCollector:
         self._overlay_checkbutton.pack(anchor=tk.W)
         self._filter_checkbutton = ttk.Checkbutton(checkbox_frame, text="Apply Median Filter (Depth)", variable=self._apply_median_filter_var)
         self._filter_checkbutton.pack(anchor=tk.W)
-        # CALIBRATION CHECKBOX REMOVED
         self._capture_btn = ttk.Button(controls_outer_frame, text="Capture Pose (Press 'W')", command=self._trigger_capture_async)
         self._capture_btn.pack(fill=tk.X, pady=(5,2))
         self.root.bind("<KeyPress-w>", lambda event: self._trigger_capture_async())
@@ -349,7 +343,7 @@ class DepthHandCollector:
         self._update_gui_status_message("GUI Initialized. Using CameraInfo for intrinsics.")
 
 
-    def _unregister_ros_subscribers(self): # (Identical)
+    def _unregister_ros_subscribers(self):
         if hasattr(self, 'timesync_filter') and self.timesync_filter is not None:
             self.timesync_filter.callbacks.clear() 
             if hasattr(self, 'rgb_subscriber_filter') and self.rgb_subscriber_filter is not None:
@@ -364,7 +358,7 @@ class DepthHandCollector:
             self.timesync_filter = None 
         rospy.loginfo("ROS subscribers have been unregistered.")
 
-    def _initialize_ros_topic_subscriptions(self): # (Identical)
+    def _initialize_ros_topic_subscriptions(self):
         self._unregister_ros_subscribers() 
         try:
             rospy.loginfo(f"Initializing ROS subscribers. RGB Topic: {self.current_rgb_topic_to_subscribe}")
@@ -386,7 +380,7 @@ class DepthHandCollector:
             self._gui_queue.put(GuiTask("update_status", "FATAL: Error setting up ROS Sync! Check topics."))
             self._gui_queue.put(GuiTask("set_controls_state", tk.DISABLED))
 
-    def _on_apply_rgb_topic_change(self): # (Identical)
+    def _on_apply_rgb_topic_change(self):
         selected_topic_display_name = self._rgb_topic_selection_var.get()
         new_selected_topic_path = RGB_TOPIC_OPTIONS.get(selected_topic_display_name)
 
@@ -402,8 +396,6 @@ class DepthHandCollector:
             messagebox.showwarning("Topic Error", "Invalid RGB topic selected.", parent=self.root)
         else:
             rospy.loginfo("Selected RGB topic is the same as current. No change needed.")
-
-    # _on_toggle_use_calibration_file() method is REMOVED
 
     def _ros_synchronized_callback(self, rgb_msg: Image, depth_msg: Image, info_msg: CameraInfo): # SIMPLIFIED
         if self.is_shutting_down: return
@@ -424,9 +416,6 @@ class DepthHandCollector:
         try:
             cv_rgb_image_raw = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
             cv_depth_image_mm = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="16UC1")
-            
-            # image_for_pose_estimation is always the raw (or rectified if selected) image
-            # No more undistortion logic here based on external calibration file
             image_for_pose_estimation = cv_rgb_image_raw.copy() 
             
             with self._data_access_lock:
@@ -444,11 +433,11 @@ class DepthHandCollector:
         except Exception as e:
             rospy.logerr_throttle(5, f"Error processing synchronized messages: {e}")
 
-    def _process_capture_and_get_label(self): # SIMPLIFIED INTRINSICS & METADATA
+    def _process_capture_and_get_label(self): 
         current_metadata_for_capture = PendingCaptureMetadata()
         current_metadata_for_capture.timestamp = datetime.datetime.now().isoformat()
         current_metadata_for_capture.rgb_source_topic = self.current_rgb_topic_to_subscribe
-        current_metadata_for_capture.calibration_used = False # Always False now
+        current_metadata_for_capture.calibration_used = False
         current_metadata_for_capture.median_filter_applied = self._apply_median_filter_var.get()
         current_metadata_for_capture.openpose_conf_threshold_value = OPENPOSE_CONFIDENCE_THRESHOLD
         
@@ -457,14 +446,13 @@ class DepthHandCollector:
         with self._data_access_lock:
             rgb_image_for_pose = self._latest_synced_data["rgb"] 
             depth_image_mm_raw = self._latest_synced_data["depth"]
-            # camera_info_msg_current = self._latest_synced_data["info_msg"] # Not needed here if fx,fy... are class members
+            # camera_info_msg_current = self._latest_synced_data["info_msg"]
 
-        if rgb_image_for_pose is None or depth_image_mm_raw is None: # Simplified check
+        if rgb_image_for_pose is None or depth_image_mm_raw is None:
             rospy.logwarn("Capture aborted: Missing RGB or Depth frame from synced data.")
             self._gui_queue.put(GuiTask("update_status", "Error: Missing image data for capture."))
             self._gui_queue.put(GuiTask("set_controls_state", tk.NORMAL)); return
 
-        # Use intrinsics from CameraInfo topic (already stored in class members)
         if not self._camera_info_topic_received or self._fx_topic is None:
             rospy.logerr("Capture critical error: Camera intrinsics from /camera_info not yet received.")
             self._gui_queue.put(GuiTask("update_status", "CRITICAL: No intrinsics from CameraInfo!"))
@@ -583,16 +571,6 @@ class DepthHandCollector:
         status_prompt_for_label = f"{num_3d_points_final_count} valid 3D pts. Label: [{', '.join(label_keys_prompt_parts)}] or Q=Cancel."
         self._gui_queue.put(GuiTask("update_status", status_prompt_for_label))
 
-    # _handle_label_key_press, _handle_cancel_key_press, _cancel_pending_capture_and_save, 
-    # _save_pending_capture_to_csv, run_gui_mainloop, ros_spin_thread_target, on_close,
-    # _process_gui_queue, _set_gui_controls_state_internal, _update_label_counts_gui_display,
-    # _update_main_preview_display, _update_depth_preview_display, _clear_depth_preview_display,
-    # _update_2d_pose_preview_display, _clear_2d_pose_preview_display,
-    # _update_3d_plot_display, _clear_3d_plot_display, _resize_image_for_display,
-    # _create_overlay_image_for_gui, _get_depth_from_neighborhood_pixels, _filter_3d_keypoints_by_distance
-    #  ... (These methods can remain largely the same as the previous refactored version, ensure all strings are English)
-    #  ... I will include the English versions of these for completeness.
-
     def _handle_label_key_press(self, label_idx: int):
         if not self._waiting_for_label_input: return
         if 0 <= label_idx < len(POSE_LABELS):
@@ -641,7 +619,7 @@ class DepthHandCollector:
                     assigned_label, 
                     metadata_to_write.timestamp, 
                     metadata_to_write.rgb_source_topic, 
-                    False, # calibration_used is always False now
+                    False,
                     metadata_to_write.median_filter_applied, 
                     metadata_to_write.openpose_conf_threshold_value,
                     metadata_to_write.num_2d_peaks_detected_raw, 
@@ -670,7 +648,7 @@ class DepthHandCollector:
             rospy.logerr(f"Unexpected error saving data to CSV: {e_gen_save}")
             self._gui_queue.put(GuiTask("update_status", "Error saving CSV! Check logs."))
 
-    def run_gui_mainloop(self): # (Identical)
+    def run_gui_mainloop(self):
         try:
             rospy.loginfo("Starting Tkinter GUI main loop...")
             self.root.mainloop()
@@ -680,7 +658,7 @@ class DepthHandCollector:
             rospy.loginfo("Exiting Tkinter GUI main loop.")
             self.on_close()
 
-    def ros_spin_thread_target(self): # (Identical)
+    def ros_spin_thread_target(self):
         try:
             rospy.spin()
             rospy.loginfo("ROS spin thread finished.")
@@ -689,7 +667,7 @@ class DepthHandCollector:
         except Exception as e_ros_spin:
             rospy.logerr(f"Error in ROS spin thread: {e_ros_spin}")
 
-    def on_close(self): # (Identical)
+    def on_close(self):
         if not self.is_shutting_down:
             rospy.loginfo("GUI window close requested. Initiating shutdown sequence...")
             self.is_shutting_down = True
@@ -712,7 +690,7 @@ class DepthHandCollector:
             except Exception as e_tk: rospy.logwarn(f"Error destroying Tkinter root window: {e_tk}")
             rospy.loginfo("GUI resources released. Collector shut down.")
 
-    def _process_gui_queue(self): # (Identical to previous refactor)
+    def _process_gui_queue(self):
         if self.is_shutting_down: return
         current_task: Optional[GuiTask] = None
         try:
@@ -750,24 +728,18 @@ class DepthHandCollector:
             if not self.is_shutting_down and hasattr(self, 'root') and self.root.winfo_exists():
                 self._after_id_gui_pump = self.root.after(50, self._process_gui_queue)
 
-    def _set_gui_controls_state_internal(self, target_tk_state: str): # SIMPLIFIED
+    def _set_gui_controls_state_internal(self, target_tk_state: str):
         if hasattr(self, '_capture_btn'): self._capture_btn.config(state=target_tk_state)
         if hasattr(self, '_filter_checkbutton'): self._filter_checkbutton.config(state=target_tk_state)
         if hasattr(self, '_overlay_checkbutton'): self._overlay_checkbutton.config(state=target_tk_state)
-        # Calibration checkbox is removed, so no need to manage its state here
-        if hasattr(self, '_rgb_topic_dropdown'): self._rgb_topic_dropdown.config(state="readonly") # Always readonly
+        if hasattr(self, '_rgb_topic_dropdown'): self._rgb_topic_dropdown.config(state="readonly")
         if hasattr(self, '_apply_topic_btn'): self._apply_topic_btn.config(state=tk.NORMAL if target_tk_state == tk.NORMAL else tk.DISABLED)
 
-    def _update_label_counts_gui_display(self): # (Identical)
+    def _update_label_counts_gui_display(self):
         for label_key, count_str_var in self._label_counts_vars.items():
             count_str_var.set(f"{label_key}: {self._label_counts.get(label_key, 0)}")
-            
-    # --- Other helper methods like _resize_image_for_display, _create_overlay_image_for_gui,
-    # _get_depth_from_neighborhood_pixels, _filter_3d_keypoints_by_distance
-    # can remain the same as the previously refactored version.
-    # Ensure all strings within them are also in English. I've included them below.
 
-    def _resize_image_for_display(self, image: np.ndarray) -> np.ndarray: # (Identical)
+    def _resize_image_for_display(self, image: np.ndarray) -> np.ndarray:
         h, w = image.shape[:2]
         max_h, max_w = DISPLAY_MAX_HEIGHT, DISPLAY_MAX_WIDTH
         if h > max_h or w > max_w:
@@ -837,8 +809,6 @@ class DepthHandCollector:
             rospy.loginfo(f"Removed {num_points_removed_by_filter} 3D outlier points (distance from wrist > {OUTLIER_XYZ_THRESHOLD_M:.2f}m).")
         return points_after_filter, current_validity_mask.tolist()
 
-
-# --- Main Execution ---
 if __name__ == "__main__":
     data_collector_instance = None
     try:

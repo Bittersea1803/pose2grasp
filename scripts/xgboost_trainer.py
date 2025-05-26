@@ -1,6 +1,3 @@
-# File: xgboost_trainer.py
-# English comments will be used as requested.
-
 import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -13,16 +10,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 def get_project_root():
-    """Gets the absolute path to the project's root directory (pose2grasp/)."""
-    # Assumes this script is in a 'scripts' subdirectory of the project root.
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def load_data(project_root_dir, relative_csv_path="data/collected_hand_poses.csv"):
-    """
-    Loads hand pose data from a CSV file.
-    'project_root_dir' is the absolute path to the project's root.
-    'relative_csv_path' is the path from project_root_dir to the CSV.
-    """
     csv_full_path = os.path.join(project_root_dir, relative_csv_path)
     print(f"Attempting to load data from: {csv_full_path}")
     try:
@@ -37,21 +27,17 @@ def load_data(project_root_dir, relative_csv_path="data/collected_hand_poses.csv
         return None
 
 def preprocess_data_xgb(df):
-    """
-    Preprocesses data for XGBoost training.
-    Handles label encoding. XGBoost can handle NaNs internally.
-    """
     if df is None:
         return None, None, None, None
 
     df_processed = df.copy()
-    df_processed.dropna(subset=['label'], inplace=True) # Remove rows where label is missing
+    df_processed.dropna(subset=['label'], inplace=True)
     if df_processed.empty:
         print("Error: No data left after dropping rows with missing labels.")
         return None, None, None, None
 
     feature_columns = []
-    for i in range(21): # 0 to 20 keypoints
+    for i in range(21):
         feature_columns.extend([f'x{i}_rel', f'y{i}_rel', f'z{i}_rel'])
     
     existing_feature_columns = [col for col in feature_columns if col in df_processed.columns]
@@ -76,17 +62,14 @@ def save_results(model, label_encoder, y_true_test, y_pred_test, model_name_pref
     """Saves the model, label encoder, classification report, and confusion matrix."""
     os.makedirs(output_subdir, exist_ok=True)
     
-    # Save model
     model_path = os.path.join(output_subdir, f"{model_name_prefix}_model.joblib")
     joblib.dump(model, model_path)
     print(f"Model saved to: {model_path}")
 
-    # Save label encoder
     encoder_path = os.path.join(output_subdir, f"label_encoder_{model_name_prefix}.joblib")
     joblib.dump(label_encoder, encoder_path)
     print(f"LabelEncoder saved to: {encoder_path}")
 
-    # Save classification report
     report_str = classification_report(y_true_test, y_pred_test, target_names=label_encoder.classes_, zero_division=0)
     accuracy = accuracy_score(y_true_test, y_pred_test)
     
@@ -97,7 +80,6 @@ def save_results(model, label_encoder, y_true_test, y_pred_test, model_name_pref
         f.write(report_str)
     print(f"Classification report saved to: {report_path}")
 
-    # Save confusion matrix plot
     cm = confusion_matrix(y_true_test, y_pred_test, labels=np.arange(len(label_encoder.classes_)))
     plt.figure(figsize=(10, 7))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
@@ -112,10 +94,6 @@ def save_results(model, label_encoder, y_true_test, y_pred_test, model_name_pref
     print(f"Confusion matrix plot saved to: {cm_path}")
 
 def tune_and_train_xgboost(X_train, y_train, X_test, y_test, feature_names, label_encoder, models_output_dir):
-    """
-    Tunes hyperparameters and trains the final XGBoost model.
-    Saves the model, encoder, and performance metrics.
-    """
     print("\n--- Training and Tuning XGBoost ---")
     
     output_subdir_xgb = os.path.join(models_output_dir, "xgboost")
@@ -125,7 +103,6 @@ def tune_and_train_xgboost(X_train, y_train, X_test, y_test, feature_names, labe
                                 use_label_encoder=False, 
                                 random_state=42)
 
-    # Expanded parameter grid for more thorough tuning
     param_grid_xgb = {
         'n_estimators': [100, 200, 300, 400],
         'max_depth': [3, 5, 7, 9],
@@ -135,43 +112,39 @@ def tune_and_train_xgboost(X_train, y_train, X_test, y_test, feature_names, labe
         'gamma': [0, 0.1, 0.2] 
     }
 
-    # For a quicker run, you can use a smaller grid:
     # param_grid_xgb_small = {
     #     'n_estimators': [100, 200], 'max_depth': [3, 5],
     #     'learning_rate': [0.1, 0.2], 'subsample': [0.8], 'colsample_bytree': [0.8]
     # }
 
     grid_search_xgb = GridSearchCV(estimator=xgb_clf, 
-                                   param_grid=param_grid_xgb, # Use param_grid_xgb_small for faster test
+                                   param_grid=param_grid_xgb,
                                    scoring='accuracy', 
-                                   cv=3, # Use 5 for more robust CV, 3 for speed
+                                   cv=3, 
                                    verbose=2,
                                    n_jobs=-1) 
 
     print("Starting GridSearchCV for XGBoost...")
-    grid_search_xgb.fit(X_train, y_train) # XGBoost handles NaNs in X_train if any
+    grid_search_xgb.fit(X_train, y_train)
 
     print("\nXGBoost Hyperparameter tuning finished.")
     print(f"Best XGBoost parameters: {grid_search_xgb.best_params_}")
     print(f"Best XGBoost cross-validation accuracy: {grid_search_xgb.best_score_:.4f}")
     
     best_model = grid_search_xgb.best_estimator_
-    
-    # Evaluate on test set
-    y_pred_test = best_model.predict(X_test) # XGBoost handles NaNs in X_test if any
+
+    y_pred_test = best_model.predict(X_test)
     test_accuracy = accuracy_score(y_test, y_pred_test)
     
     print(f"XGBoost Test Set Accuracy with best model: {test_accuracy:.4f}")
 
-    # Save all results
     save_results(best_model, label_encoder, y_test, y_pred_test, "xgboost", output_subdir_xgb)
     
     return best_model, test_accuracy
 
 def main():
-    """Main function to run the XGBoost training and tuning pipeline."""
     project_root = get_project_root()
-    models_output_dir = os.path.join(project_root, "models") # Main models directory
+    models_output_dir = os.path.join(project_root, "models")
 
     print("--- XGBoost Training Pipeline Started ---")
     df = load_data(project_root_dir=project_root)

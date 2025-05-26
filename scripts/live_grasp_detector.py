@@ -1,7 +1,3 @@
-# File: scripts/live_grasp_detector.py
-# Description: Performs real-time grasp detection using a trained model with 3D keypoint data.
-# English comments.
-
 import os
 import sys
 import time
@@ -41,24 +37,20 @@ except ImportError as e:
     sys.exit(1)
 
 # --- Configuration Constants ---
-# Use the RGB topic that your models were trained on (likely rectified)
 RGB_TOPIC = "/camera/rgb/image_rect_color" 
 REGISTERED_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw" # Ensure this topic is active
 CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
 OPENPOSE_MODEL_FILE = os.path.join(OPENPOSE_PYTHON_PATH, "model", "hand_pose_model.pth")
 
-# Processing parameters (should ideally match data_collect.py settings if used during collection)
 OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
 VALID_DEPTH_THRESHOLD_MM = (400, 1500)
 DEPTH_NEIGHBORHOOD_SIZE = 3
-DEPTH_STD_DEV_THRESHOLD_MM = 35.0 # Max std dev in depth neighborhood
-OUTLIER_XYZ_THRESHOLD_M = 0.5 # Max distance from wrist for a keypoint
-APPLY_MEDIAN_FILTER_TO_DEPTH = True # Set to False if depth is already good or for speed
+DEPTH_STD_DEV_THRESHOLD_MM = 35.0
+OUTLIER_XYZ_THRESHOLD_M = 0.5
+APPLY_MEDIAN_FILTER_TO_DEPTH = True
 MEDIAN_FILTER_KERNEL_SIZE = 3
 
-# For optimizing processing speed (less aggressive for 3D)
-FRAME_PROCESSING_INTERVAL_MS = 200 # Process a frame roughly every X milliseconds (e.g., 200ms = 5 FPS)
-
+FRAME_PROCESSING_INTERVAL_MS = 200
 
 class LiveGraspDetector:
     def __init__(self, model_type="xgboost"):
@@ -77,7 +69,7 @@ class LiveGraspDetector:
         self.model_type = model_type.lower()
         self.model = None
         self.label_encoder = None
-        self.imputer = None # For Random Forest
+        self.imputer = None
         self.feature_names = [f'{c}{i}_rel' for i in range(21) for c in ('x', 'y', 'z')]
 
         # --- Load Model, Encoder, and Imputer (if RF) ---
@@ -99,10 +91,6 @@ class LiveGraspDetector:
                 else:
                     rospy.logwarn(f"Imputer for Random Forest not found at {imputer_path}. Creating a new one (median).")
                     self.imputer = SimpleImputer(missing_values=np.nan, strategy='median')
-                    # This new imputer is not fitted. It will be fitted on the first batch of data if NaNs are present,
-                    # or you might need to save a fitted one from training.
-                    # For simplicity, if NaNs appear and imputer isn't fitted, it might cause issues.
-                    # Best to ensure the saved imputer from training is used.
         except FileNotFoundError as e:
             rospy.logfatal(f"Error loading model/encoder/imputer: {e}. Ensure files exist in '{model_subdir}'.")
             sys.exit(1)
@@ -129,7 +117,7 @@ class LiveGraspDetector:
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub, self.info_sub], 
             queue_size=10, 
-            slop=0.1 # Allow 100ms slop
+            slop=0.1
         )
         self.ts.registerCallback(self._synchronized_callback)
         
@@ -139,7 +127,7 @@ class LiveGraspDetector:
     def _synchronized_callback(self, rgb_msg: Image, depth_msg: Image, info_msg: CameraInfo):
         current_time = time.time()
         if (current_time - self._last_processed_time) * 1000 < FRAME_PROCESSING_INTERVAL_MS:
-            return # Skip frame
+            return
         self._last_processed_time = current_time
 
         if not self._camera_info_received:
@@ -153,7 +141,7 @@ class LiveGraspDetector:
                 rospy.logerr_throttle(5, f"Error processing CameraInfo: {e}")
                 return
         
-        if not self._camera_info_received: # Still no intrinsics
+        if not self._camera_info_received: 
             rospy.logwarn_throttle(5.0, "Waiting for valid CameraInfo to be processed...")
             return
 
@@ -167,7 +155,6 @@ class LiveGraspDetector:
         self._process_frame_data(cv_rgb, cv_depth_mm)
 
     def _get_depth_from_neighborhood(self, depth_map_mm: np.ndarray, cx_px: float, cy_px: float, size: int) -> float:
-        # (Copied and adapted from your data_collect.py - ensure consistency)
         if depth_map_mm is None: return np.nan
         radius = size // 2
         h, w = depth_map_mm.shape
@@ -189,13 +176,12 @@ class LiveGraspDetector:
         return float(np.median(valid_depths) / 1000.0) # Return in meters
 
     def _filter_3d_outliers(self, keypoints_3d_rel: np.ndarray) -> np.ndarray:
-        # (Copied and adapted from your data_collect.py - ensure consistency)
         points_filtered = keypoints_3d_rel.copy()
         validity_mask = ~np.isnan(points_filtered).any(axis=1)
-        if not validity_mask[0]: return points_filtered # Wrist must be valid
+        if not validity_mask[0]: return points_filtered
 
         max_dist_sq = OUTLIER_XYZ_THRESHOLD_M ** 2
-        for i in range(1, 21): # Check points 1-20
+        for i in range(1, 21):
             if validity_mask[i]:
                 dist_sq = np.sum(points_filtered[i]**2)
                 if dist_sq > max_dist_sq:
@@ -205,7 +191,7 @@ class LiveGraspDetector:
     def _process_frame_data(self, rgb_frame_bgr: np.ndarray, depth_frame_mm: np.ndarray):
         start_time_proc = time.time()
         try:
-            # 1. Median Filter on Depth (Optional)
+            # 1. Median Filter on Depth
             depth_to_use = depth_frame_mm
             if APPLY_MEDIAN_FILTER_TO_DEPTH:
                 ksize = MEDIAN_FILTER_KERNEL_SIZE
@@ -230,12 +216,12 @@ class LiveGraspDetector:
                     peaks_2d_for_projection[i, :] = all_peaks_2d[i, :2]
                     num_confident_peaks +=1
             
-            if num_confident_peaks < MIN_VALID_KEYPOINTS_FOR_SAVE : # Check early if enough points
+            if num_confident_peaks < MIN_VALID_KEYPOINTS_FOR_SAVE :
                 sys.stdout.write(f"\rToo few confident 2D peaks: {num_confident_peaks}. FPS: ---")
                 sys.stdout.flush()
                 return
 
-            # 4. Project to 3D (Camera Coordinates)
+            # 4. Project to 3D
             keypoints_3d_cam = np.full((21, 3), np.nan, dtype=np.float32)
             for i in range(21):
                 if not np.isnan(peaks_2d_for_projection[i, 0]): # If 2D point exists
@@ -273,7 +259,7 @@ class LiveGraspDetector:
             
             features_df = pd.DataFrame([feature_vector_list], columns=self.feature_names)
 
-            # 8. Handle NaNs if Random Forest (using the loaded, fitted imputer)
+            # 8. Handle NaNs if Random Forest (using imputer)
             if self.model_type == "random_forest" and self.imputer:
                 if features_df.isnull().sum().sum() > 0:
                     try:
@@ -282,9 +268,8 @@ class LiveGraspDetector:
                         rospy.logwarn_throttle(10, f"Imputer error: {e_impute}. Trying to fill remaining NaNs with 0 for RF.")
                         features_df = features_df.fillna(0) # Fallback
             elif self.model_type == "xgboost" and features_df.isnull().sum().sum() > 0:
-                # XGBoost handles NaNs, but if you want to fill them to avoid potential issues or for consistency:
-                # features_df = features_df.fillna(0) # Example: fill with 0 for XGBoost
-                pass # Let XGBoost handle it by default
+                # features_df = features_df.fillna(0)
+                pass
 
             # 9. Predict
             prediction_numeric = self.model.predict(features_df)
@@ -298,7 +283,7 @@ class LiveGraspDetector:
 
         except Exception as e:
             rospy.logerr_throttle(5.0, f"Error in frame processing: {e}")
-            # import traceback # Uncomment for detailed debugging
+            # import traceback 
             # rospy.logerr_throttle(5.0, traceback.format_exc())
 
 

@@ -62,7 +62,7 @@ CSV_FILENAME = "collected_hand_poses.csv" # Unified CSV filename
 CSV_FULL_PATH = os.path.join(DATA_DIR, CSV_FILENAME)
 
 VALID_DEPTH_THRESHOLD_MM = (400, 1500)
-MIN_VALID_KEYPOINTS_FOR_SAVE = 16 
+MIN_VALID_KEYPOINTS_FOR_SAVE = 18 
 DISPLAY_MAX_WIDTH = 320
 DISPLAY_MAX_HEIGHT = 240
 DEPTH_NEIGHBORHOOD_SIZE = 3      
@@ -73,6 +73,7 @@ POSE_LABELS = ["basic", "wide", "pinch", "scissor"]
 MESSAGE_FILTER_SLOP = 0.1        
 OVERLAY_ALPHA = 0.5              
 OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
+MAX_LIMB_LENGTH_M = 0.08
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -205,7 +206,7 @@ class DepthHandCollector:
                 writer = csv.writer(file)
                 if not file_exists or os.path.getsize(CSV_FULL_PATH) == 0:
                     rospy.loginfo(f"Creating new CSV file: {CSV_FULL_PATH}")
-                    header = ['label', 'timestamp', 'rgb_source_topic', 'median_filter_applied', 
+                    header = ['label', 'timestamp', 'rgb_source_topic',  'calibration_used','median_filter_applied', 
                               'openpose_conf_threshold', 'num_2d_peaks_detected_raw', 
                               'num_2d_peaks_above_conf', 'num_3d_points_initial', 'num_3d_points_final']
                     header.extend([f'{c}{i}_rel' for i in range(21) for c in ('x', 'y', 'z')])
@@ -375,6 +376,38 @@ class DepthHandCollector:
         self._gui_queue.put(GuiTask("set_controls_state", tk.DISABLED))
         threading.Thread(target=self._process_capture, daemon=True).start()
 
+    def _filter_3d_by_limb_length(self, keypoints_3d_rel, validity_mask):
+        points_filtered = keypoints_3d_rel.copy()
+        new_validity_mask = list(validity_mask) 
+        for _ in range(2):
+            num_removed_in_pass = 0
+            for p1_idx, p2_idx in HAND_CONNECTIONS:
+                if (p1_idx < len(new_validity_mask) and p2_idx < len(new_validity_mask) and
+                        new_validity_mask[p1_idx] and new_validity_mask[p2_idx]):
+                    
+                    p1 = points_filtered[p1_idx]
+                    p2 = points_filtered[p2_idx]
+                    
+                    dist_sq = np.sum((p1 - p2)**2)
+                    
+                    if dist_sq > MAX_LIMB_LENGTH_M**2:
+                        # Anomaly detected: this limb is too long.
+                        dist_p1_sq_from_wrist = np.sum(p1**2)
+                        dist_p2_sq_from_wrist = np.sum(p2**2)
+                        
+                        if dist_p1_sq_from_wrist > dist_p2_sq_from_wrist:
+                            points_filtered[p1_idx] = np.nan
+                            new_validity_mask[p1_idx] = False
+                        else:
+                            points_filtered[p2_idx] = np.nan
+                            new_validity_mask[p2_idx] = False
+                        num_removed_in_pass += 1
+            
+            if num_removed_in_pass == 0:
+                break
+                        
+        return points_filtered, new_validity_mask
+
     def _process_capture(self):
         with self._data_access_lock:
             rgb_image_cap = self._latest_synced_data.get("rgb")
@@ -448,6 +481,10 @@ class DepthHandCollector:
             keypoints_3d_relative = keypoints_3d_camera_frame_full 
 
         keypoints_3d_relative_filtered, final_validity_mask = self._filter_3d_outliers(keypoints_3d_relative)
+        keypoints_3d_relative_filtered, final_validity_mask = self._filter_3d_by_limb_length(
+            keypoints_3d_relative_filtered, final_validity_mask
+        )
+
         num_final_valid_3d_points = np.sum(final_validity_mask)
         
         self._pending_capture = CaptureData(
@@ -508,12 +545,10 @@ class DepthHandCollector:
         try:
             with open(CSV_FULL_PATH, 'a', newline='', encoding='utf-8') as file:
                 writer = csv.writer(file)
-                row = [
-                    assigned_label, metadata.timestamp, metadata.rgb_source_topic,
-                    metadata.median_filter_applied, metadata.openpose_conf_threshold_value,
-                    metadata.num_2d_peaks_detected_raw, metadata.num_2d_peaks_above_conf,
-                    metadata.num_3d_points_initial, num_valid_to_save
-                ]
+                row = [assigned_label, metadata.timestamp, metadata.rgb_source_topic, False,
+                        metadata.median_filter_applied, metadata.openpose_conf_threshold_value,
+                        metadata.num_2d_peaks_detected_raw, metadata.num_2d_peaks_above_conf,
+                        metadata.num_3d_points_initial, num_valid_to_save]
                 coords_flat = []
                 for i in range(21): 
                     if validity_mask[i] and not np.isnan(points_to_save[i]).any():
@@ -611,26 +646,49 @@ class DepthHandCollector:
     def _update_gui_3d_plot(self, points_3d_relative_coords, title_text):
         if not (hasattr(self, '_ax_3d') and self._canvas_3d.get_tk_widget().winfo_exists()): return
         self._ax_3d.clear()
-        if points_3d_relative_coords is not None and np.sum(~np.isnan(points_3d_relative_coords)) > 0:
-            valid_indices_for_plot = ~np.isnan(points_3d_relative_coords).any(axis=1)
-            valid_display_points = points_3d_relative_coords[valid_indices_for_plot]
-            
-            if valid_display_points.shape[0] > 0:
-                self._ax_3d.scatter(valid_display_points[:, 0], -valid_display_points[:, 1], -valid_display_points[:, 2], c='r', marker='o', s=15)
-                for conn_idx, (p1_idx, p2_idx) in enumerate(HAND_CONNECTIONS):
-                    if valid_indices_for_plot[p1_idx] and valid_indices_for_plot[p2_idx]:
-                        pt1_3d = points_3d_relative_coords[p1_idx]
-                        pt2_3d = points_3d_relative_coords[p2_idx]
-                        self._ax_3d.plot([pt1_3d[0], pt2_3d[0]], 
-                                         [-pt1_3d[1], -pt2_3d[1]], 
-                                         [-pt1_3d[2], -pt2_3d[2]], 
-                                         color=np.array(LIMB_COLORS[conn_idx % len(LIMB_COLORS)])/255.0, linewidth=1.5)
         
-        self._ax_3d.set_xlabel('X (m)'); self._ax_3d.set_ylabel('-Y (m)'); self._ax_3d.set_zlabel('-Z (m)')
+        if points_3d_relative_coords is not None and np.sum(~np.isnan(points_3d_relative_coords)) > 0:
+            valid_indices = ~np.isnan(points_3d_relative_coords).any(axis=1)
+            valid_points = points_3d_relative_coords[valid_indices]
+
+            if valid_points.shape[0] > 0:
+                x = valid_points[:, 0]
+                y = -valid_points[:, 1]
+                z = -valid_points[:, 2]
+                
+                self._ax_3d.scatter(x, y, z, c='r', marker='o')
+
+                for conn_idx, (p1_idx, p2_idx) in enumerate(HAND_CONNECTIONS):
+                    if valid_indices[p1_idx] and valid_indices[p2_idx]:
+                        p1 = points_3d_relative_coords[p1_idx]
+                        p2 = points_3d_relative_coords[p2_idx]
+                        self._ax_3d.plot([p1[0], p2[0]], [-p1[1], -p2[1]], [-p1[2], -p2[2]], color=[c/255.0 for c in LIMB_COLORS[conn_idx % len(LIMB_COLORS)]])
+
+                all_vals = np.array([x, y, z]).flatten()
+                min_vals = np.nanmin(valid_points, axis=0)
+                max_vals = np.nanmax(valid_points, axis=0)
+                centers = (min_vals + max_vals) / 2.0
+                ranges = (max_vals - min_vals).max() / 2.0
+                if ranges < 0.05: ranges = 0.05
+
+                self._ax_3d.set_xlim(centers[0] - ranges, centers[0] + ranges)
+                self._ax_3d.set_ylim(-(centers[1] + ranges), -(centers[1] - ranges))
+                self._ax_3d.set_zlim(-(centers[2] + ranges), -(centers[2] - ranges))
+        else:
+            self._ax_3d.set_xlim([-0.15, 0.15])
+            self._ax_3d.set_ylim([-0.15, 0.15])
+            self._ax_3d.set_zlim([-0.15, 0.15])
+
+        self._ax_3d.set_xlabel('X (m)')
+        self._ax_3d.set_ylabel('-Y (m)')
+        self._ax_3d.set_zlabel('-Z (m)')
         self._ax_3d.set_title(title_text)
-        self._ax_3d.set_xlim([-0.3, 0.3]); self._ax_3d.set_ylim([-0.3, 0.3]); self._ax_3d.set_zlim([-0.3, 0.3]) 
-        try: self._ax_3d.set_aspect('equal') 
-        except NotImplementedError: pass
+
+        try:
+            self._ax_3d.set_aspect('equal', adjustable='box')
+        except NotImplementedError:
+            self._ax_3d.set_aspect('auto')
+        
         self._canvas_3d.draw_idle()
 
     def _clear_gui_display(self, target_label_widget, text_to_show):

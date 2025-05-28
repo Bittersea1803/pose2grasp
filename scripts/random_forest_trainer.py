@@ -29,13 +29,13 @@ def load_data(project_root_dir, relative_csv_path="data/collected_hand_poses.csv
 
 def preprocess_data_rf(df):
     if df is None:
-        return None, None, None, None, None # Added None for imputer
+        return None, None, None, None 
 
     df_processed = df.copy()
     df_processed.dropna(subset=['label'], inplace=True)
     if df_processed.empty:
         print("Error: No data left after dropping rows with missing labels.")
-        return None, None, None, None, None
+        return None, None, None, None
 
     feature_columns = []
     for i in range(21):
@@ -45,7 +45,7 @@ def preprocess_data_rf(df):
     
     if not existing_feature_columns:
         print("Error: No expected feature columns found.")
-        return None, None, None, None, None
+        return None, None, None, None
         
     X = df_processed[existing_feature_columns].copy()
     y_text = df_processed['label'].copy()
@@ -55,16 +55,12 @@ def preprocess_data_rf(df):
     
     print(f"Number of features (columns) used for X: {len(X.columns)}")
     
-    imputer = SimpleImputer(missing_values=np.nan, strategy='median')
     if X.isnull().sum().sum() > 0:
-        print(f"Info: Feature data contains {X.isnull().sum().sum()} NaN values. Applying SimpleImputer (median strategy).")
-        X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+        print(f"Info: Raw feature data contains {X.isnull().sum().sum()} NaN values. Imputation will be handled after train/test split.")
     else:
-        print("Info: No NaN values found in features. Imputation not strictly needed but imputer is fitted.")
-        # Fit imputer even if no NaNs in training, for consistency if test set has NaNs
-        X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns) 
+        print("Info: No NaN values found in raw features.")
         
-    return X_imputed, y_encoded, label_encoder, existing_feature_columns, imputer
+    return X, y_encoded, label_encoder, existing_feature_columns
 
 def save_results(model, label_encoder, imputer, y_true_test, y_pred_test, model_name_prefix, output_subdir):
     os.makedirs(output_subdir, exist_ok=True)
@@ -141,8 +137,8 @@ def tune_and_train_random_forest(X_train, y_train, X_test, y_test, feature_names
     
     best_model = grid_search_rf.best_estimator_
     
-    X_test_imputed = pd.DataFrame(imputer.transform(X_test), columns=feature_names)
-    y_pred_test = best_model.predict(X_test_imputed)
+    # X_test is already imputed when passed to this function
+    y_pred_test = best_model.predict(X_test)
     test_accuracy = accuracy_score(y_test, y_pred_test)
 
     print(f"Random Forest Test Set Accuracy with best model: {test_accuracy:.4f}")
@@ -160,15 +156,17 @@ def main():
     if df is None:
         return
 
-    X_imputed, y_encoded, label_encoder, feature_names, imputer = preprocess_data_rf(df)
-    if X_imputed is None:
+    X_raw, y_encoded, label_encoder, feature_names = preprocess_data_rf(df) # Expects 4 values
+    if X_raw is None:
         return
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_imputed, y_encoded, test_size=0.25, random_state=42, stratify=y_encoded
-    )
-    
-    print(f"\nData split into training and testing sets (after imputation):")
+    X_train_raw, X_test_raw, y_train, y_test = train_test_split(X_raw, y_encoded, test_size=0.25, random_state=42, stratify=y_encoded)
+
+    imputer = SimpleImputer(missing_values=np.nan, strategy='median')
+    X_train = pd.DataFrame(imputer.fit_transform(X_train_raw), columns=feature_names)
+    X_test = pd.DataFrame(imputer.transform(X_test_raw), columns=feature_names)
+
+    print(f"\nData split and imputed:")
     print(f"Training set shape: X_train={X_train.shape}, y_train={y_train.shape}")
     print(f"Test set shape: X_test={X_test.shape}, y_test={y_test.shape}")
     if label_encoder:

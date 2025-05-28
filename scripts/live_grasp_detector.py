@@ -28,8 +28,7 @@ try:
     if not os.path.isdir(OPENPOSE_PYTHON_PATH):
         raise ImportError(f"OpenPose Python path not found at: {OPENPOSE_PYTHON_PATH}")
     sys.path.append(OPENPOSE_PYTHON_PATH)
-    from src.hand import Hand 
-    from src import util as openpose_util
+    from src.hand import Hand
     rospy.loginfo("Successfully imported OpenPose modules.")
 except ImportError as e:
     print(f"Fatal Error: Cannot import OpenPose from {OPENPOSE_PYTHON_PATH}.")
@@ -49,8 +48,21 @@ DEPTH_STD_DEV_THRESHOLD_MM = 35.0
 OUTLIER_XYZ_THRESHOLD_M = 0.5
 APPLY_MEDIAN_FILTER_TO_DEPTH = True
 MEDIAN_FILTER_KERNEL_SIZE = 3
+MIN_VALID_KEYPOINTS_FOR_SAVE = 18 # Must be consistent with data_collect.py if model trained on its data
+MAX_LIMB_LENGTH_M = 0.08          # Must be consistent with data_collect.py
 
 FRAME_PROCESSING_INTERVAL_MS = 200
+
+# --- Visualization Constants (copied from data_collect.py for _filter_3d_by_limb_length) ---
+HAND_CONNECTIONS = [
+    [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8],
+    [0, 9], [9, 10], [10, 11], [11, 12], [0, 13], [13, 14], [14, 15], [15, 16],
+    [0, 17], [17, 18], [18, 19], [19, 20]
+]
+# LIMB_COLORS are not needed for filtering logic itself, only for drawing.
+
+from typing import Optional, List # For type hinting
+
 
 class LiveGraspDetector:
     def __init__(self, model_type="xgboost"):
@@ -188,6 +200,48 @@ class LiveGraspDetector:
                     points_filtered[i] = np.nan
         return points_filtered
 
+    def _filter_3d_by_limb_length(self, keypoints_3d_rel: np.ndarray, validity_mask: List[bool]) -> Tuple[np.ndarray, List[bool]]:
+        """
+        Filters 3D keypoints by checking limb lengths.
+        Adapted from data_collect.py for consistency.
+        """
+        points_filtered = keypoints_3d_rel.copy()
+        new_validity_mask = list(validity_mask)
+
+        MAX_ITERATIONS = 5 # Safety break for the while loop
+        for iteration in range(MAX_ITERATIONS):
+            num_removed_in_pass = 0
+            for p1_idx, p2_idx in HAND_CONNECTIONS:
+                if not (0 <= p1_idx < len(new_validity_mask) and 0 <= p2_idx < len(new_validity_mask)):
+                    continue
+
+                if new_validity_mask[p1_idx] and new_validity_mask[p2_idx]:
+                    p1 = points_filtered[p1_idx]
+                    p2 = points_filtered[p2_idx]
+
+                    if np.isnan(p1).any() or np.isnan(p2).any():
+                        continue
+
+                    dist_sq = np.sum((p1 - p2)**2)
+
+                    if dist_sq > MAX_LIMB_LENGTH_M**2:
+                        dist_p1_sq_from_origin = np.sum(p1**2) # Origin is wrist for relative coords
+                        dist_p2_sq_from_origin = np.sum(p2**2)
+
+                        idx_to_invalidate = p1_idx if dist_p1_sq_from_origin > dist_p2_sq_from_origin else p2_idx
+                        if new_validity_mask[idx_to_invalidate]:
+                            points_filtered[idx_to_invalidate] = np.nan
+                            new_validity_mask[idx_to_invalidate] = False
+                            num_removed_in_pass += 1
+            
+            if num_removed_in_pass == 0:
+                break 
+        
+        if iteration == MAX_ITERATIONS - 1 and num_removed_in_pass > 0:
+            rospy.logwarn_throttle(10, f"Limb length filter reached max iterations ({MAX_ITERATIONS}) and still making changes.")
+                        
+        return points_filtered, new_validity_mask
+
     def _process_frame_data(self, rgb_frame_bgr: np.ndarray, depth_frame_mm: np.ndarray):
         start_time_proc = time.time()
         try:
@@ -216,7 +270,7 @@ class LiveGraspDetector:
                     peaks_2d_for_projection[i, :] = all_peaks_2d[i, :2]
                     num_confident_peaks +=1
             
-            if num_confident_peaks < MIN_VALID_KEYPOINTS_FOR_SAVE :
+            if num_confident_peaks < MIN_VALID_KEYPOINTS_FOR_SAVE:
                 sys.stdout.write(f"\rToo few confident 2D peaks: {num_confident_peaks}. FPS: ---")
                 sys.stdout.flush()
                 return
@@ -243,10 +297,18 @@ class LiveGraspDetector:
                 sys.stdout.flush()
                 return
             
-            # 6. Filter 3D outliers
-            keypoints_3d_rel_filtered = self._filter_3d_outliers(keypoints_3d_rel)
+            # 6. Filter 3D outliers (distance from wrist)
+            keypoints_3d_rel_filtered_outliers = self._filter_3d_outliers(keypoints_3d_rel)
+
+            # 6b. Filter 3D by limb length (for consistency with data_collect.py)
+            # Create an initial validity mask based on the outlier filter's results
+            current_validity_mask_after_outliers = (~np.isnan(keypoints_3d_rel_filtered_outliers).any(axis=1)).tolist()
             
-            num_valid_final = np.sum(~np.isnan(keypoints_3d_rel_filtered).any(axis=1))
+            keypoints_3d_rel_final_filtered, final_validity_mask_list = self._filter_3d_by_limb_length(
+                keypoints_3d_rel_filtered_outliers, current_validity_mask_after_outliers
+            )
+            num_valid_final = np.sum(final_validity_mask_list)
+
             if num_valid_final < MIN_VALID_KEYPOINTS_FOR_SAVE:
                 sys.stdout.write(f"\rNot enough valid 3D points after filtering: {num_valid_final}. FPS: ---")
                 sys.stdout.flush()
@@ -255,7 +317,7 @@ class LiveGraspDetector:
             # 7. Prepare feature vector for model
             feature_vector_list = []
             for i in range(21):
-                feature_vector_list.extend(keypoints_3d_rel_filtered[i])
+                feature_vector_list.extend(keypoints_3d_rel_final_filtered[i])
             
             features_df = pd.DataFrame([feature_vector_list], columns=self.feature_names)
 

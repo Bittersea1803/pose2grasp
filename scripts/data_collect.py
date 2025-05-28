@@ -379,32 +379,49 @@ class DepthHandCollector:
     def _filter_3d_by_limb_length(self, keypoints_3d_rel, validity_mask):
         points_filtered = keypoints_3d_rel.copy()
         new_validity_mask = list(validity_mask) 
-        for _ in range(2):
+
+        MAX_ITERATIONS = 5 # Safety break for the while loop
+        for iteration in range(MAX_ITERATIONS):
             num_removed_in_pass = 0
             for p1_idx, p2_idx in HAND_CONNECTIONS:
-                if (p1_idx < len(new_validity_mask) and p2_idx < len(new_validity_mask) and
-                        new_validity_mask[p1_idx] and new_validity_mask[p2_idx]):
+                # Ensure indices are within bounds of the current mask
+                if not (0 <= p1_idx < len(new_validity_mask) and 0 <= p2_idx < len(new_validity_mask)):
+                    continue
+
+                if new_validity_mask[p1_idx] and new_validity_mask[p2_idx]:
                     
                     p1 = points_filtered[p1_idx]
                     p2 = points_filtered[p2_idx]
                     
+                    # Check if points are still valid (not NaNs introduced by previous removals in the same pass)
+                    if np.isnan(p1).any() or np.isnan(p2).any():
+                        continue
+
                     dist_sq = np.sum((p1 - p2)**2)
                     
                     if dist_sq > MAX_LIMB_LENGTH_M**2:
                         # Anomaly detected: this limb is too long.
-                        dist_p1_sq_from_wrist = np.sum(p1**2)
-                        dist_p2_sq_from_wrist = np.sum(p2**2)
+                        # Invalidate the point that is further from the origin (assumed to be the wrist
+                        # if coordinates are relative, or camera origin otherwise).
+                        dist_p1_sq_from_origin = np.sum(p1**2)
+                        dist_p2_sq_from_origin = np.sum(p2**2)
                         
-                        if dist_p1_sq_from_wrist > dist_p2_sq_from_wrist:
-                            points_filtered[p1_idx] = np.nan
-                            new_validity_mask[p1_idx] = False
-                        else:
-                            points_filtered[p2_idx] = np.nan
-                            new_validity_mask[p2_idx] = False
-                        num_removed_in_pass += 1
+                        if dist_p1_sq_from_origin > dist_p2_sq_from_origin:
+                            if new_validity_mask[p1_idx]: # Only act if it's currently considered valid
+                                points_filtered[p1_idx] = np.nan
+                                new_validity_mask[p1_idx] = False
+                                num_removed_in_pass += 1
+                        else: # p2 is further or they are equidistant (invalidate p2 by default)
+                            if new_validity_mask[p2_idx]: # Only act if it's currently considered valid
+                                points_filtered[p2_idx] = np.nan
+                                new_validity_mask[p2_idx] = False
+                                num_removed_in_pass += 1
             
             if num_removed_in_pass == 0:
-                break
+                break # No changes in this pass, stable state reached
+        
+        if iteration == MAX_ITERATIONS - 1 and num_removed_in_pass > 0:
+            rospy.logwarn_throttle(10, f"Limb length filter reached max iterations ({MAX_ITERATIONS}) and still making changes.")
                         
         return points_filtered, new_validity_mask
 

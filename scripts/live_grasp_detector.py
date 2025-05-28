@@ -9,14 +9,13 @@ import rospy
 import torch
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
-import message_filters # For synchronizing image, depth, and camera_info
+import message_filters 
 import joblib
 from sklearn.impute import SimpleImputer
 import pandas as pd
 
 # --- Path Configuration ---
 def get_project_root():
-    """Gets the absolute path to the project's root directory (pose2grasp/)."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PROJECT_ROOT = get_project_root()
@@ -37,7 +36,7 @@ except ImportError as e:
 
 # --- Configuration Constants ---
 RGB_TOPIC = "/camera/rgb/image_rect_color" 
-REGISTERED_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw" # Ensure this topic is active
+REGISTERED_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw" 
 CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
 OPENPOSE_MODEL_FILE = os.path.join(OPENPOSE_PYTHON_PATH, "model", "hand_pose_model.pth")
 
@@ -45,24 +44,21 @@ OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
 VALID_DEPTH_THRESHOLD_MM = (400, 1500)
 DEPTH_NEIGHBORHOOD_SIZE = 3
 DEPTH_STD_DEV_THRESHOLD_MM = 35.0
-OUTLIER_XYZ_THRESHOLD_M = 0.5
+OUTLIER_XYZ_THRESHOLD_M = 0.25 
 APPLY_MEDIAN_FILTER_TO_DEPTH = True
 MEDIAN_FILTER_KERNEL_SIZE = 3
-MIN_VALID_KEYPOINTS_FOR_SAVE = 18 # Must be consistent with data_collect.py if model trained on its data
-MAX_LIMB_LENGTH_M = 0.08          # Must be consistent with data_collect.py
+MIN_VALID_KEYPOINTS_FOR_SAVE = 13 
+MAX_LIMB_LENGTH_M = 0.10          
 
 FRAME_PROCESSING_INTERVAL_MS = 200
 
-# --- Visualization Constants (copied from data_collect.py for _filter_3d_by_limb_length) ---
 HAND_CONNECTIONS = [
     [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8],
     [0, 9], [9, 10], [10, 11], [11, 12], [0, 13], [13, 14], [14, 15], [15, 16],
     [0, 17], [17, 18], [18, 19], [19, 20]
 ]
-# LIMB_COLORS are not needed for filtering logic itself, only for drawing.
 
-from typing import Optional, List # For type hinting
-
+from typing import Optional, List, Tuple 
 
 class LiveGraspDetector:
     def __init__(self, model_type="xgboost"):
@@ -84,7 +80,6 @@ class LiveGraspDetector:
         self.imputer = None
         self.feature_names = [f'{c}{i}_rel' for i in range(21) for c in ('x', 'y', 'z')]
 
-        # --- Load Model, Encoder, and Imputer (if RF) ---
         model_subdir = os.path.join(MODELS_DIR_ROOT, self.model_type)
         model_path = os.path.join(model_subdir, f"{self.model_type}_model.joblib" if self.model_type == "xgboost" else f"best_{self.model_type}_model.joblib")
         encoder_path = os.path.join(model_subdir, f"label_encoder_{self.model_type}.joblib")
@@ -101,8 +96,8 @@ class LiveGraspDetector:
                     self.imputer = joblib.load(imputer_path)
                     rospy.loginfo(f"Imputer loaded from {imputer_path}")
                 else:
-                    rospy.logwarn(f"Imputer for Random Forest not found at {imputer_path}. Creating a new one (median).")
-                    self.imputer = SimpleImputer(missing_values=np.nan, strategy='median')
+                    rospy.logfatal(f"Imputer for Random Forest not found at {imputer_path}. This is required for Random Forest. Please ensure it's generated during training.")
+                    sys.exit(1) # Exit if imputer is missing for RF
         except FileNotFoundError as e:
             rospy.logfatal(f"Error loading model/encoder/imputer: {e}. Ensure files exist in '{model_subdir}'.")
             sys.exit(1)
@@ -144,11 +139,15 @@ class LiveGraspDetector:
 
         if not self._camera_info_received:
             try:
-                if len(info_msg.K) == 9:
+                # Check for K attribute, 9 elements, and positive fx, fy
+                if hasattr(info_msg, 'K') and len(info_msg.K) == 9 and \
+                   info_msg.K[0] > 0 and info_msg.K[4] > 0:
                     self._fx, self._fy = info_msg.K[0], info_msg.K[4]
                     self._cx, self._cy = info_msg.K[2], info_msg.K[5]
                     self._camera_info_received = True
                     rospy.loginfo_once(f"Camera intrinsics received: fx={self._fx:.2f}, fy={self._fy:.2f}, cx={self._cx:.2f}, cy={self._cy:.2f}")
+                # else: # Optionally, log if K is present but not valid yet
+                    # rospy.logwarn_throttle(5.0, "CameraInfo K matrix received but fx/fy are not positive yet.")
             except Exception as e:
                 rospy.logerr_throttle(5, f"Error processing CameraInfo: {e}")
                 return
@@ -166,13 +165,18 @@ class LiveGraspDetector:
         
         self._process_frame_data(cv_rgb, cv_depth_mm)
 
-    def _get_depth_from_neighborhood(self, depth_map_mm: np.ndarray, cx_px: float, cy_px: float, size: int) -> float:
+    def _get_depth_from_neighborhood(self, depth_map_mm: np.ndarray, cx_px: float, cy_px: float, size: int, keypoint_idx_for_log: Optional[int] = None) -> float:
         if depth_map_mm is None: return np.nan
         radius = size // 2
         h, w = depth_map_mm.shape
         ix, iy = int(round(cx_px)), int(round(cy_px))
+        log_prefix = f"Wrist (0) depth: " if keypoint_idx_for_log == 0 else (f"KP{keypoint_idx_for_log} depth: " if keypoint_idx_for_log is not None else "Depth: ")
 
-        if not (0 <= ix < w and 0 <= iy < h): return np.nan
+        if not (0 <= ix < w and 0 <= iy < h):
+            if keypoint_idx_for_log == 0: # Log only for wrist to reduce noise
+                rospy.logwarn_throttle(5, f"{log_prefix}Coords ({ix},{iy}) out of bounds ({w},{h}).")
+            return np.nan
+
         y_min, y_max = max(0, iy - radius), min(h, iy + radius + 1)
         x_min, x_max = max(0, ix - radius), min(w, ix + radius + 1)
         neighborhood = depth_map_mm[y_min:y_max, x_min:x_max]
@@ -180,11 +184,17 @@ class LiveGraspDetector:
         min_d, max_d_thresh = VALID_DEPTH_THRESHOLD_MM
         valid_depths = neighborhood[(neighborhood >= min_d) & (neighborhood <= max_d_thresh)]
 
-        if valid_depths.size < max(1, (size*size)//4): return np.nan
+        if valid_depths.size < max(1, (size*size)//4):
+            if keypoint_idx_for_log == 0: # Log only for wrist
+                 rospy.logwarn_throttle(5, f"{log_prefix}Not enough valid depth pixels in neighborhood. Found {valid_depths.size}, need {max(1, (size*size)//4)} at ({cx_px:.1f},{cy_px:.1f}). Values: {valid_depths[:5]}") # Show some values
+            return np.nan
         
         std_dev = np.std(valid_depths)
-        if std_dev > DEPTH_STD_DEV_THRESHOLD_MM: return np.nan
-        
+        if std_dev > DEPTH_STD_DEV_THRESHOLD_MM:
+            if keypoint_idx_for_log == 0: # Log only for wrist
+                rospy.logwarn_throttle(5, f"{log_prefix}Depth std dev too high ({std_dev:.1f}mm > {DEPTH_STD_DEV_THRESHOLD_MM}mm) at ({cx_px:.1f},{cy_px:.1f}).")
+            return np.nan
+        if keypoint_idx_for_log == 0: rospy.loginfo_throttle(2, f"{log_prefix}Depth median {np.median(valid_depths):.1f}mm, std {std_dev:.1f}mm for coords ({cx_px:.1f},{cy_px:.1f})")
         return float(np.median(valid_depths) / 1000.0) # Return in meters
 
     def _filter_3d_outliers(self, keypoints_3d_rel: np.ndarray) -> np.ndarray:
@@ -254,11 +264,19 @@ class LiveGraspDetector:
 
             # 2. OpenPose Hand Detection
             all_peaks_2d = self._hand_estimator(rgb_frame_bgr.copy())
+            if isinstance(all_peaks_2d, np.ndarray) and all_peaks_2d.shape[0] > 0:
+                wrist_peak_raw = all_peaks_2d[0] if all_peaks_2d.shape[0] > 0 else "N/A"
+                rospy.loginfo_throttle(2, f"OpenPose raw wrist (0) peak: {wrist_peak_raw}")
+            else:
+                rospy.loginfo_throttle(2, f"OpenPose raw output: {all_peaks_2d}")
 
             if not isinstance(all_peaks_2d, np.ndarray) or all_peaks_2d.ndim != 2 or all_peaks_2d.shape[0] == 0:
                 sys.stdout.write("\rNo hand detected or invalid OpenPose output. FPS: ---")
                 sys.stdout.flush()
                 return
+
+            # Ensure all_peaks_2d has at least 3 columns (x, y, confidence)
+            has_confidence = all_peaks_2d.shape[1] >= 3
 
             # 3. Filter 2D peaks by confidence and prepare full 21-point array
             peaks_2d_for_projection = np.full((21, 2), np.nan, dtype=np.float32)
@@ -269,7 +287,12 @@ class LiveGraspDetector:
                 if is_confident:
                     peaks_2d_for_projection[i, :] = all_peaks_2d[i, :2]
                     num_confident_peaks +=1
+                if i == 0: # Specifically log wrist confidence
+                    wrist_conf = all_peaks_2d[i, 2] if has_confidence else "N/A (no conf column)"
+                    rospy.loginfo_throttle(2, f"Wrist (0) 2D coords: {all_peaks_2d[i, :2]}, Conf: {wrist_conf}, Passes conf filter: {is_confident}")
             
+            rospy.loginfo_throttle(2, f"Wrist (0) 2D after confidence filter: {peaks_2d_for_projection[0]}")
+
             if num_confident_peaks < MIN_VALID_KEYPOINTS_FOR_SAVE:
                 sys.stdout.write(f"\rToo few confident 2D peaks: {num_confident_peaks}. FPS: ---")
                 sys.stdout.flush()
@@ -280,12 +303,14 @@ class LiveGraspDetector:
             for i in range(21):
                 if not np.isnan(peaks_2d_for_projection[i, 0]): # If 2D point exists
                     x_px, y_px = float(peaks_2d_for_projection[i, 0]), float(peaks_2d_for_projection[i, 1])
-                    z_m = self._get_depth_from_neighborhood(depth_to_use, x_px, y_px, DEPTH_NEIGHBORHOOD_SIZE)
+                    z_m = self._get_depth_from_neighborhood(depth_to_use, x_px, y_px, DEPTH_NEIGHBORHOOD_SIZE, keypoint_idx_for_log=i)
                     if not np.isnan(z_m):
                         x_cam = (x_px - self._cx) * z_m / self._fx
                         y_cam = (y_px - self._cy) * z_m / self._fy
                         keypoints_3d_cam[i] = [x_cam, y_cam, z_m]
             
+            rospy.loginfo_throttle(2, f"Wrist (0) 3D cam coords before relative conversion: {keypoints_3d_cam[0]}")
+
             # 5. Convert to Relative Coordinates (to wrist)
             keypoints_3d_rel = np.full_like(keypoints_3d_cam, np.nan)
             if not np.isnan(keypoints_3d_cam[0]).any(): # If wrist is valid

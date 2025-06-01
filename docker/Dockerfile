@@ -20,7 +20,7 @@ RUN pip install 'git+https://github.com/facebookresearch/fvcore'
 
 RUN apt-get update && apt-get install -y ffmpeg libsm6 libxext6 git ninja-build libglib2.0-0 libsm6 libxrender-dev libxext6
 RUN apt-get install -y python3-tk
-RUN pip install numpy matplotlib opencv-python scipy scikit-image tqdm pandas xgboost seaborn scikit-learn
+RUN pip install numpy matplotlib opencv-python scipy scikit-image tqdm pandas xgboost seaborn scikit-learn open3d
 
 RUN apt-get update && apt-get install -y lsb-release
 

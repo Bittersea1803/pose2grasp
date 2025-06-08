@@ -24,7 +24,7 @@ RUN pip install numpy matplotlib opencv-python scipy scikit-image tqdm pandas xg
 RUN apt-get update && apt-get install -y lsb-release
 
 RUN sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list'
-RUN apt install -y curl # Može se spojiti s prethodnim apt-get update && apt-get install -y curl lsb-release
+RUN apt install -y curl 
 RUN curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo apt-key add -
 RUN apt update && apt install -y ros-noetic-desktop 
 RUN echo "source /opt/ros/noetic/setup.bash" >> ~/.bashrc

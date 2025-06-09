@@ -11,6 +11,8 @@ from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
 import message_filters 
 import joblib
+from std_msgs.msg import String
+from collections import deque, Counter
 from sklearn.impute import SimpleImputer
 import pandas as pd
 
@@ -50,7 +52,13 @@ MEDIAN_FILTER_KERNEL_SIZE = 3
 MIN_VALID_KEYPOINTS_FOR_SAVE = 13 
 MAX_LIMB_LENGTH_M = 0.10          
 
-FRAME_PROCESSING_INTERVAL_MS = 200
+FRAME_PROCESSING_INTERVAL_MS = 100 # Reduced for potentially faster voting updates
+
+# --- Voting Configuration ---
+VOTING_WINDOW_SIZE = 10          # Number of high-confidence predictions to consider in the sliding window
+VOTING_CONFIDENCE_THRESHOLD = 0.60 # Minimum probability for a prediction to be considered a vote
+MIN_VOTE_AGREEMENT_PERCENTAGE = 0.7 # Pct of votes in window that must agree for a stable decision (e.g., 0.7 for 70%)
+GRASP_DECISION_TOPIC = "/pose2grasp/grasp_type" # Topic to publish the stable, voted grasp decision
 
 HAND_CONNECTIONS = [
     [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8],
@@ -130,6 +138,20 @@ class LiveGraspDetector:
         
         rospy.loginfo(f"Synchronized subscribers initialized for topics:\n  RGB: {RGB_TOPIC}\n  Depth: {REGISTERED_DEPTH_TOPIC}\n  Info: {CAMERA_INFO_TOPIC}")
         rospy.loginfo("Live Grasp Detector node running. Waiting for data...")
+
+        # --- Voting Mechanism ---
+        self.VOTING_WINDOW_SIZE = VOTING_WINDOW_SIZE
+        self.VOTING_CONFIDENCE_THRESHOLD = VOTING_CONFIDENCE_THRESHOLD
+        self.MIN_VOTE_AGREEMENT_PERCENTAGE = MIN_VOTE_AGREEMENT_PERCENTAGE
+        self._min_votes_for_decision = max(1, int(self.VOTING_WINDOW_SIZE * self.MIN_VOTE_AGREEMENT_PERCENTAGE))
+
+        self._vote_buffer = deque(maxlen=self.VOTING_WINDOW_SIZE)
+        self._current_stable_prediction: Optional[str] = None
+        self.grasp_decision_publisher = rospy.Publisher(GRASP_DECISION_TOPIC, String, queue_size=10)
+        
+        rospy.loginfo(f"Voting mechanism initialized: Window={self.VOTING_WINDOW_SIZE}, ConfThresh={self.VOTING_CONFIDENCE_THRESHOLD}, VoteAgreePct={self.MIN_VOTE_AGREEMENT_PERCENTAGE} (MinVotes={self._min_votes_for_decision})")
+        rospy.loginfo(f"Publishing voted grasp decisions to: {GRASP_DECISION_TOPIC}")
+
 
     def _synchronized_callback(self, rgb_msg: Image, depth_msg: Image, info_msg: CameraInfo):
         current_time = time.time()
@@ -271,7 +293,7 @@ class LiveGraspDetector:
                 rospy.loginfo_throttle(2, f"OpenPose raw output: {all_peaks_2d}")
 
             if not isinstance(all_peaks_2d, np.ndarray) or all_peaks_2d.ndim != 2 or all_peaks_2d.shape[0] == 0:
-                sys.stdout.write("\rNo hand detected or invalid OpenPose output. FPS: ---")
+                sys.stdout.write("\rNo hand detected. RawFPS: --- Voted: Waiting...")
                 sys.stdout.flush()
                 return
 
@@ -294,7 +316,7 @@ class LiveGraspDetector:
             rospy.loginfo_throttle(2, f"Wrist (0) 2D after confidence filter: {peaks_2d_for_projection[0]}")
 
             if num_confident_peaks < MIN_VALID_KEYPOINTS_FOR_SAVE:
-                sys.stdout.write(f"\rToo few confident 2D peaks: {num_confident_peaks}. FPS: ---")
+                sys.stdout.write(f"\rLow 2D conf peaks: {num_confident_peaks}. RawFPS: --- Voted: Waiting...")
                 sys.stdout.flush()
                 return
 
@@ -318,7 +340,7 @@ class LiveGraspDetector:
                 keypoints_3d_rel = keypoints_3d_cam - wrist_3d
                 keypoints_3d_rel[0] = [0.0, 0.0, 0.0]
             else: # Wrist not detected in 3D
-                sys.stdout.write(f"\rWrist not detected in 3D. FPS: ---")
+                sys.stdout.write(f"\rWrist not in 3D. RawFPS: --- Voted: Waiting...")
                 sys.stdout.flush()
                 return
             
@@ -335,7 +357,7 @@ class LiveGraspDetector:
             num_valid_final = np.sum(final_validity_mask_list)
 
             if num_valid_final < MIN_VALID_KEYPOINTS_FOR_SAVE:
-                sys.stdout.write(f"\rNot enough valid 3D points after filtering: {num_valid_final}. FPS: ---")
+                sys.stdout.write(f"\rLow 3D valid pts: {num_valid_final}. RawFPS: --- Voted: Waiting...")
                 sys.stdout.flush()
                 return
 
@@ -359,13 +381,50 @@ class LiveGraspDetector:
                 pass
 
             # 9. Predict
-            prediction_numeric = self.model.predict(features_df)
-            predicted_label_str = self.label_encoder.inverse_transform(prediction_numeric)[0]
+            # Get raw prediction and its confidence
+            raw_prediction_numeric = self.model.predict(features_df)
+            current_raw_prediction_label = self.label_encoder.inverse_transform(raw_prediction_numeric)[0]
             
+            probabilities = self.model.predict_proba(features_df)[0]
+            # The predicted class index from predict() corresponds to the max probability
+            confidence_of_predicted_class = probabilities[raw_prediction_numeric[0]]
+
+            # --- Voting Logic ---
+            voted_grasp_status_for_display = "Waiting..."
+
+            if confidence_of_predicted_class >= self.VOTING_CONFIDENCE_THRESHOLD:
+                self._vote_buffer.append(current_raw_prediction_label)
+            # else:
+                # rospy.logdebug_throttle(2, f"Raw pred '{current_raw_prediction_label}' conf {confidence_of_predicted_class:.2f} too low. Vote not added.")
+
+            if len(self._vote_buffer) == self.VOTING_WINDOW_SIZE: # Buffer is full, time to evaluate
+                vote_counts = Counter(self._vote_buffer)
+                # most_common_vote can be None if buffer is empty, but it won't be if len is VOTING_WINDOW_SIZE > 0
+                most_common_vote, num_most_common = vote_counts.most_common(1)[0] 
+
+                if num_most_common >= self._min_votes_for_decision:
+                    voted_grasp_status_for_display = f"Stable: {most_common_vote} ({num_most_common}/{self.VOTING_WINDOW_SIZE})"
+                    if self._current_stable_prediction != most_common_vote:
+                        self._current_stable_prediction = most_common_vote
+                        self.grasp_decision_publisher.publish(String(data=most_common_vote))
+                        rospy.loginfo(f"VOTED GRASP PUBLISHED: {most_common_vote} (Votes: {num_most_common}/{len(self._vote_buffer)})")
+                else: # Not enough consensus
+                    voted_grasp_status_for_display = f"Unstable ({most_common_vote}:{num_most_common})"
+                    if self._current_stable_prediction is not None:
+                        rospy.loginfo(f"Voted grasp consensus lost. Was: {self._current_stable_prediction}. Current top: {most_common_vote} ({num_most_common} votes). Buffer: {list(self._vote_buffer)}")
+                        self.grasp_decision_publisher.publish(String(data="unknown")) # Publish unknown
+                        self._current_stable_prediction = None
+            elif len(self._vote_buffer) > 0 :
+                 voted_grasp_status_for_display = f"Collecting ({len(self._vote_buffer)}/{self.VOTING_WINDOW_SIZE})"
+            else:
+                voted_grasp_status_for_display = "No high-conf votes yet"
+
+            # --- Timing and Display ---
             end_time_proc = time.time()
             fps_proc = 1.0 / (end_time_proc - start_time_proc) if (end_time_proc - start_time_proc) > 0 else float('inf')
             
-            sys.stdout.write(f"\rPredicted Grasp: {predicted_label_str.upper():<10} | Valid 3D pts: {num_valid_final:<2} | FPS: {fps_proc:.1f}   ")
+            display_msg = f"\rRaw: {current_raw_prediction_label.upper():<10} ({confidence_of_predicted_class:.2f}) | Voted: {voted_grasp_status_for_display:<30} | 3Dpts: {num_valid_final:<2} | FPS: {fps_proc:.1f}  "
+            sys.stdout.write(display_msg)
             sys.stdout.flush()
 
         except Exception as e:

@@ -1,0 +1,58 @@
+<launch>
+    <!-- 
+      This launch file starts all the custom perception and control nodes 
+      for the Pose2Grasp project.
+      
+      Prerequisites (must be started separately):
+      1. Camera driver (e.g., roslaunch realsense2_camera rs_camera.launch)
+      2. OpenPose ROS node
+      3. UR5 driver and MoveIt (as per su-mentor's instructions)
+    -->
+
+    <!-- ======== GRASP DETECTOR NODE ======== -->
+    <!-- This node detects the type of hand grasp -->
+    <node name="live_grasp_detector" pkg="pose2grasp" type="live_grasp_detector.py" output="screen">
+        <!-- Path to the trained model, relative to the package root -->
+        <param name="model_path" value="models/xgboost/xgboost_model.joblib" />
+        
+        <!-- Confidence threshold for predictions (0.0 to 1.0) -->
+        <param name="confidence_threshold" value="0.80" />
+        
+        <!-- Number of recent predictions to consider for smoothing -->
+        <param name="voter_buffer_size" value="15" />
+
+        <!-- Remap topics to match the rest of the system -->
+        <remap from="~openpose_topic" to="/ros_openpose/frame" />
+        <remap from="~output_topic" to="/pose2grasp/grasp_type" />
+    </node>
+
+    <!-- ======== OBJECT DETECTOR NODE (OPEN3D) ======== -->
+    <!-- This node finds the object on the table -->
+    <node name="plane_object_detector" pkg="pose2grasp" type="plane_object_detector.py" output="screen">
+        <!-- Topic for incoming point cloud data from the camera -->
+        <remap from="~input_topic" to="/camera/depth_registered/points" />
+        
+        <!-- Topic where this node will publish the object's position -->
+        <remap from="~output_topic" to="/object_detector/object_position" />
+        
+        <!-- Parameters for Open3D segmentation and clustering -->
+        <param name="voxel_leaf_size" value="0.005" />
+        <param name="plane_distance_threshold" value="0.015" />
+        <param name="cluster_eps" value="0.03" />
+        <param name="cluster_min_points" value="40" />
+    </node>
+    
+    <!-- ======== MAIN ORCHESTRATOR NODE ======== -->
+    <!-- This is the "brain" that connects everything and commands the robot -->
+    <node name="grasp_orchestrator" pkg="pose2grasp" type="grasp_orchestrator.py" output="screen">
+        <!-- Time in seconds the grasp must be stable before triggering -->
+        <param name="stability_time" value="2.0" />
+        
+        <!-- Frame ID of the robot's base. This MUST match the TF tree. -->
+        <param name="robot_base_frame" value="base_link" />
+        
+        <!-- Height above the object for the pre-grasp approach -->
+        <param name="z_offset_approach" value="0.15" />
+    </node>
+    
+</launch>

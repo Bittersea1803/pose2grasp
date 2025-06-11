@@ -1,2 +1,8 @@
-notes.txt
-*.png
+*
+!2025_miletic_DR/
+!2025_miletic_DR/ferit_ur5_ws/
+!2025_miletic_DR/ferit_ur5_ws/src/
+!2025_miletic_DR/ferit_ur5_ws/src/student/
+!2025_miletic_DR/ferit_ur5_ws/src/student/miletic_dr/
+!2025_miletic_DR/ferit_ur5_ws/src/student/miletic_dr/src/
+!2025_miletic_DR/ferit_ur5_ws/src/student/miletic_dr/src/**

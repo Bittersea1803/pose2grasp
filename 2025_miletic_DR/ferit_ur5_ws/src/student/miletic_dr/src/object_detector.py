@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import sys
 import threading
@@ -6,9 +7,10 @@ import cv2
 import rospy
 import open3d as o3d
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge, CvBridgeError
 import message_filters
+from tf.transformations import quaternion_from_matrix
 
 
 class PlaneObjectDetector:
@@ -25,13 +27,20 @@ class PlaneObjectDetector:
         self.current_frame_id = None # To store the frame_id for publishing
         self.camera_info_received = False
 
-        # ROS topic names (adjust if needed)
+
+        # === LAB ===
+        # self.RGB_TOPIC = "/camera/color/image_raw" 
+        # self.DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw" 
+        # self.INFO_TOPIC = "/camera/rgb/camera_info"
+
+        # === Home ===
         self.RGB_TOPIC = "/camera/rgb/image_rect_color"
         self.DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
-        self.INFO_TOPIC = "/camera/rgb/camera_info"
+        self.INFO_TOPIC = "/camera/rgb/camera_info" # Vjerojatno je isti
+        
         self.OBJECT_OUTPUT_TOPIC = "/plane_object_detector/biggest_object_position" # Topic for the biggest object
 
-        self.object_pos_publisher = rospy.Publisher(self.OBJECT_OUTPUT_TOPIC, PointStamped, queue_size=1)
+        self.object_pos_publisher = rospy.Publisher(self.OBJECT_OUTPUT_TOPIC, PoseStamped, queue_size=1)
 
         # Set up synchronized subscribers
         self._setup_subscribers()
@@ -103,104 +112,104 @@ class PlaneObjectDetector:
 
         # 3) Segment dominant plane using RANSAC
         plane_model, inliers = pcd_down.segment_plane(distance_threshold=0.01,
-                                                      ransac_n=3,
-                                                      num_iterations=1000)
+                                                        ransac_n=3,
+                                                        num_iterations=1000)
         [a, b, c, d] = plane_model
         rospy.loginfo_throttle(2, f"[PlaneObjectDetector] Plane equation: {a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0")
 
         # Extract plane and objects point clouds
         plane_cloud = pcd_down.select_by_index(inliers)
-        plane_cloud.paint_uniform_color([0.8, 0.8, 0.8])  # light gray for plane
+        plane_cloud.paint_uniform_color([0.8, 0.8, 0.8])
         objects_cloud = pcd_down.select_by_index(inliers, invert=True)
-        objects_cloud.paint_uniform_color([1.0, 0.0, 0.0])  # red for all objects
 
         # 4) Further filter objects: keep only points a certain height above plane
-        #    (to remove small noise near plane). Compute plane distances of each object point.
         plane_normal = np.array([a, b, c])
         plane_normal /= np.linalg.norm(plane_normal)
         plane_d = d
         points_objects = np.asarray(objects_cloud.points)
-        # Distance from plane for each point: (n . x + d) / ||n||
         distances = (points_objects @ plane_normal + plane_d)
-        # Consider only points with positive distance > threshold (e.g., 2cm)
         height_thresh = 0.02
         mask_above = distances > height_thresh
 
-        # Create a point cloud of objects above the plane
         filtered_objects_pcd = o3d.geometry.PointCloud()
-        if np.count_nonzero(mask_above) >= 10: # Need at least some points for further processing
+        if np.count_nonzero(mask_above) >= 10:
             filtered_objects_pcd.points = o3d.utility.Vector3dVector(points_objects[mask_above])
-            # Color these points for visualization (e.g., green)
-            # filtered_objects_pcd.paint_uniform_color([0.0, 1.0, 0.0]) # Optional: if objects_cloud was not colored
         else:
-            rospy.loginfo_throttle(5, "[PlaneObjectDetector] Not enough points above plane to detect objects.")
-            self._update_open3d_visualization(plane_cloud, None, []) # Pass empty list for bboxes
-            return
-
-        if not filtered_objects_pcd.has_points(): # Should be caught by above, but as a safeguard
+            rospy.loginfo_throttle(5, "[PlaneObjectDetector] Not enough points above plane.")
             self._update_open3d_visualization(plane_cloud, None, [])
             return
 
         # 5) Cluster the filtered object points using DBSCAN
-        eps = 0.02  # 2cm
+        eps = 0.02
         min_points = 20
         labels = np.array(filtered_objects_pcd.cluster_dbscan(eps=eps, min_points=min_points, print_progress=False))
 
-        # If no labels or all points are noise (max_label = -1)
-        if labels.size == 0 or labels.max() < 0:
-            rospy.loginfo_throttle(5, "[PlaneObjectDetector] DBSCAN found no clusters or only noise.")
-            self._update_open3d_visualization(plane_cloud, filtered_objects_pcd, []) # Show plane and unclustered points
+        max_label = labels.max()
+        if max_label < 0:
+            rospy.loginfo_throttle(5, "[PlaneObjectDetector] DBSCAN found no clusters.")
+            self._update_open3d_visualization(plane_cloud, filtered_objects_pcd, [])
             return
 
-        max_label = labels.max()
-        rospy.loginfo_throttle(2, f"[PlaneObjectDetector] DBSCAN initially found {max_label + 1} potential clusters.")
+        # 6) For each valid cluster, compute OBB and collect data
+        valid_clusters_data = []
+        cluster_geoms_for_viz = [] # <-- Kolekcija za vizualizaciju
 
-        # 6) For each valid cluster, compute oriented bounding box and collect data
-        valid_clusters_data = [] # List of dicts: {'id', 'pcd', 'obb', 'num_points'}
         for cluster_id in range(max_label + 1):
             mask = (labels == cluster_id)
             num_points_in_cluster = np.count_nonzero(mask)
-
-            if num_points_in_cluster < min_points: # Filter out clusters smaller than DBSCAN's min_points
+            if num_points_in_cluster < min_points:
                 continue
 
             cluster_pts = np.asarray(filtered_objects_pcd.points)[mask]
             cluster_pcd = o3d.geometry.PointCloud()
             cluster_pcd.points = o3d.utility.Vector3dVector(cluster_pts)
-            # Normals are not strictly required for OBB but can be estimated if needed for other purposes
-            # cluster_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
             obb = cluster_pcd.get_oriented_bounding_box()
-            
-            # Color OBB and cluster points for visualization
+
+            # Obojaj za vizualizaciju
             color = np.random.rand(3)
             obb.color = color
             cluster_pcd.paint_uniform_color(color)
+            
+            # <-- ISPRAVAK: SPREMI PODATKE U LISTU, NE OBJAVLJUJ ODMAH
             valid_clusters_data.append({
                 'id': cluster_id,
-                'pcd': cluster_pcd, # This pcd is for visualization of the cluster itself
                 'obb': obb,
                 'num_points': num_points_in_cluster
             })
+            cluster_geoms_for_viz.append((cluster_pcd, obb))
 
-        # 7) Publish position of the biggest object and update visualization
-        cluster_geoms_for_viz = [(data['pcd'], data['obb']) for data in valid_clusters_data]
-
+        # --- 7) Publish position of the biggest object and update visualization ---
+        # <-- ISPRAVAK: SVA LOGIKA ZA ODABIR I SLANJE IDE OVDJE, NAKON PETLJE
         if valid_clusters_data:
-            valid_clusters_data.sort(key=lambda c: c['num_points'], reverse=True) # Sort by num_points
+            # Sortiraj klastere po broju točaka da nađeš najveći
+            valid_clusters_data.sort(key=lambda c: c['num_points'], reverse=True)
             biggest_object_data = valid_clusters_data[0]
-            biggest_object_center = biggest_object_data['obb'].get_center()
 
-            point_msg = PointStamped()
-            point_msg.header.stamp = rospy.Time.now() # Use current time for published message
-            point_msg.header.frame_id = self.current_frame_id
-            point_msg.point.x, point_msg.point.y, point_msg.point.z = biggest_object_center
-            self.object_pos_publisher.publish(point_msg)
-            rospy.loginfo_throttle(1, f"[PlaneObjectDetector] Published biggest object center: [{point_msg.point.x:.3f}, {point_msg.point.y:.3f}, {point_msg.point.z:.3f}] in frame {self.current_frame_id} ({biggest_object_data['num_points']} points)")
+            # Sada dohvati OBB i njegove karakteristike
+            biggest_object_obb = biggest_object_data['obb']
+            center = biggest_object_obb.get_center()
+            rotation_matrix = biggest_object_obb.R
+
+            # Kreiranje 4x4 matrice za konverziju u kvaternion
+            transform_matrix = np.identity(4)
+            transform_matrix[:3, :3] = rotation_matrix
+            quaternion = quaternion_from_matrix(transform_matrix)
+
+            # Kreiranje i slanje PoseStamped poruke
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp = rospy.Time.now()
+            pose_msg.header.frame_id = self.current_frame_id
+            pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z = center
+            pose_msg.pose.orientation.x, pose_msg.pose.orientation.y, pose_msg.pose.orientation.z, pose_msg.pose.orientation.w = quaternion
+            
+            self.object_pos_publisher.publish(pose_msg)
+            rospy.loginfo_throttle(1, f"[PlaneObjectDetector] Published biggest object pose ({biggest_object_data['num_points']} points)")
         else:
-            rospy.loginfo_throttle(2, "[PlaneObjectDetector] No sufficiently large object clusters found to publish.")
+            rospy.loginfo_throttle(2, "[PlaneObjectDetector] No valid object clusters found.")
 
+        # Ažuriranje vizualizacije sa svim pronađenim klasterima
         self._update_open3d_visualization(plane_cloud, filtered_objects_pcd, cluster_geoms_for_viz)
-
+        
     def _create_point_cloud_from_depth(self, depth_16u: np.ndarray, rgb_bgr: np.ndarray):
         """
         Convert depth image and aligned RGB into an Open3D point cloud.

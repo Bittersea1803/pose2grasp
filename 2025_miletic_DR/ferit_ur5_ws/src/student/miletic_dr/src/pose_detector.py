@@ -1,202 +1,211 @@
 #!/usr/bin/env python3
-import os
-import sys
-import time
-import cv2
-import numpy as np
+# -*- coding: utf-8 -*-
+
 import rospy
+import numpy as np
+import cv2
 import torch
 import joblib
-import pandas as pd
-import message_filters
-from sensor_msgs.msg import Image, CameraInfo
-from cv_bridge import CvBridge, CvBridgeError
-from std_msgs.msg import String
 from collections import deque, Counter
-from typing import Optional, List, Tuple
+import os
+import sys
 
-# --- Automatsko postavljanje putanja ---
+from sensor_msgs.msg import Image, CameraInfo
+from std_msgs.msg import String
+from cv_bridge import CvBridge
+import message_filters
+
+# --- Configurable Camera Topics ---
+CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
+CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
+CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+
+# --- Path Configuration ---
 try:
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    PACKAGE_SRC_DIR = os.path.dirname(SCRIPT_DIR) 
-    PACKAGE_ROOT_DIR = os.path.dirname(PACKAGE_SRC_DIR)
+    SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+    PACKAGE_ROOT_DIR = os.path.join(SRC_DIR, '..')
     OPENPOSE_PATH = os.path.join(PACKAGE_ROOT_DIR, 'pytorch-openpose')
     sys.path.append(OPENPOSE_PATH)
     from src.hand import Hand
-    rospy.loginfo(f"Successfully imported OpenPose from: {OPENPOSE_PATH}")
 except ImportError:
-    rospy.logfatal(f"Could not find 'pytorch-openpose' directory. Please check the folder structure.")
+    rospy.logfatal("Could not import OpenPose. Check path in pose_detector.py.")
     sys.exit(1)
 
-
-def nothing(x):
-    pass
-
-# --- Konstante ---
-GRASP_DECISION_TOPIC = "/pose2grasp/grasp_type"
-HAND_CONNECTIONS = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [0, 13], [13, 14], [14, 15], [15, 16], [0, 17], [17, 18], [18, 19], [19, 20]]
+# --- Constants ---
 VALID_DEPTH_THRESHOLD_MM = (400, 1500)
+OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
+MIN_VALID_KEYPOINTS_FOR_PREDICTION = 15
+OUTLIER_XYZ_THRESHOLD_M = 0.25
+MAX_LIMB_LENGTH_M = 0.10
 DEPTH_NEIGHBORHOOD_SIZE = 3
-MIN_VALID_KEYPOINTS = 13
-VOTING_WINDOW_SIZE = 10
-VOTING_AGREEMENT_PERCENTAGE = 0.7
+DEPTH_STD_DEV_THRESHOLD_MM = 35.0
+MEDIAN_FILTER_KERNEL_SIZE = 3
 
-class LiveGraspDetector:
-    def __init__(self, model_type="xgboost"):
-        rospy.init_node("live_grasp_detector_node", anonymous=True)
-        self.bridge = CvBridge()
-        self.is_shutdown = False
-        
-        # --- Konfiguracija kamere ---
-        self.RGB_TOPIC = "/camera/rgb/image_rect_color"
-        self.DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
-        self.INFO_TOPIC = "/camera/rgb/camera_info"
-        
-        # --- Učitavanje modela s relativnim putanjama ---
-        self.model_type = model_type.lower()
-        models_dir = os.path.join(SCRIPT_DIR, 'models', self.model_type)
-        model_path = os.path.join(models_dir, f'{self.model_type}_model.joblib')
-        encoder_path = os.path.join(models_dir, f'label_encoder_{self.model_type}.joblib')
-        
+HAND_CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [0,9],[9,10],[10,11],[11,12],
+    [0,13],[13,14],[14,15],[15,16],
+    [0,17],[17,18],[18,19],[19,20]
+]
+
+
+class HandPoseClassifierLogic:
+    def __init__(self, model_path, encoder_path, hand_model_path):
+        self.hand_estimator = Hand(hand_model_path)
+        self.classifier_model = joblib.load(model_path)
+        self.label_encoder = joblib.load(encoder_path)
+        self.fx = self.fy = self.cx = self.cy = None
+
+    def set_camera_intrinsics(self, fx, fy, cx, cy):
+        self.fx, self.fy, self.cx, self.cy = fx, fy, cx, cy
+
+    def process_frame(self, rgb_image, depth_image):
+        if self.fx is None:
+            raise ValueError("Camera intrinsics are not set.")
+
+        depth_filtered = cv2.medianBlur(depth_image, MEDIAN_FILTER_KERNEL_SIZE)
+        all_peaks = self.hand_estimator(rgb_image)
+        if all_peaks is None:
+            return None
+
+        has_confidence = all_peaks.shape[1] == 3
+        keypoints_2d = np.full((21, 2), np.nan, dtype=np.float32)
+        for i in range(min(21, all_peaks.shape[0])):
+            if (has_confidence and all_peaks[i, 2] >= OPENPOSE_CONFIDENCE_THRESHOLD) or not has_confidence:
+                keypoints_2d[i] = all_peaks[i, :2]
+
+        keypoints_3d = self._project_points_to_3d(keypoints_2d, depth_filtered)
+        if np.isnan(keypoints_3d[0]).any():
+            return None
+
+        relative_kps, mask = self._filter_3d_outliers(keypoints_3d - keypoints_3d[0])
+        relative_kps, mask = self._filter_3d_by_limb_length(relative_kps, mask)
+
+        if np.sum(mask) < MIN_VALID_KEYPOINTS_FOR_PREDICTION:
+            return None
+
+        features = np.nan_to_num(relative_kps.flatten()).reshape(1, -1)
         try:
-            self.model = joblib.load(model_path)
-            self.label_encoder = joblib.load(encoder_path)
-            rospy.loginfo(f"Successfully loaded model from: {model_path}")
-        except FileNotFoundError as e:
-            rospy.logfatal(f"FATAL: Could not load model files. Error: {e}")
-            sys.exit(1)
-        
-        self.feature_names = [f'{c}{i}_rel' for i in range(21) for c in ('x', 'y', 'z')]
+            pred_encoded = self.classifier_model.predict(features)
+            return self.label_encoder.inverse_transform(pred_encoded)[0]
+        except (IndexError, ValueError):
+            return None
 
-        # --- Inicijalizacija OpenPose ---
-        openpose_model_file = os.path.join(OPENPOSE_PATH, "model", "hand_pose_model.pth")
-        self._hand_estimator = Hand(openpose_model_file)
-        self._openpose_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self._hand_estimator.model = self._hand_estimator.model.to(self._openpose_device)
-        rospy.loginfo(f"OpenPose running on device: {self._openpose_device}")
+    def _project_points_to_3d(self, keypoints_2d, depth_map):
+        keypoints_3d = np.full((21, 3), np.nan, dtype=np.float32)
+        for i, (u, v) in enumerate(keypoints_2d):
+            if not np.isnan(u):
+                z = self.get_robust_depth(depth_map, int(u), int(v))
+                if not np.isnan(z):
+                    x, y = (u - self.cx) * z / self.fx, (v - self.cy) * z / self.fy
+                    keypoints_3d[i] = [x, y, z]
+        return keypoints_3d
 
-        # --- ROS ---
-        self.grasp_decision_publisher = rospy.Publisher(GRASP_DECISION_TOPIC, String, queue_size=10)
-        rgb_sub = message_filters.Subscriber(self.RGB_TOPIC, Image)
-        depth_sub = message_filters.Subscriber(self.DEPTH_TOPIC, Image)
-        info_sub = message_filters.Subscriber(self.INFO_TOPIC, CameraInfo)
-        self.ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub, info_sub], queue_size=10, slop=0.1)
-        self.ts.registerCallback(self._callback)
+    def get_robust_depth(self, depth_map_mm, u_px, v_px):
+        if not (0 <= v_px < depth_map_mm.shape[0] and 0 <= u_px < depth_map_mm.shape[1]):
+            return np.nan
+        radius = DEPTH_NEIGHBORHOOD_SIZE // 2
+        y_start, y_end = max(0, v_px-radius), min(depth_map_mm.shape[0], v_px+radius+1)
+        x_start, x_end = max(0, u_px-radius), min(depth_map_mm.shape[1], u_px+radius+1)
+        neighborhood = depth_map_mm[y_start:y_end, x_start:x_end]
+        valid_depths = neighborhood[(neighborhood >= VALID_DEPTH_THRESHOLD_MM[0]) & (neighborhood <= VALID_DEPTH_THRESHOLD_MM[1])]
+        if valid_depths.size < max(1, (DEPTH_NEIGHBORHOOD_SIZE**2) // 4):
+            return np.nan
+        if np.std(valid_depths) > DEPTH_STD_DEV_THRESHOLD_MM:
+            return np.nan
+        return float(np.median(valid_depths)) / 1000.0
 
-        # --- GUI i Varijable Stanja ---
-        self.cv_window_name = "Live Grasp Detector"
-        self._init_gui()
-        self._init_state_variables()
+    def _filter_3d_outliers(self, keypoints_3d_relative):
+        filtered_points = keypoints_3d_relative.copy()
+        validity_mask = ~np.isnan(filtered_points).any(axis=1)
+        if not validity_mask[0]:
+            return filtered_points, validity_mask.tolist()
+        max_dist_sq = OUTLIER_XYZ_THRESHOLD_M ** 2
+        for i in range(1, 21):
+            if validity_mask[i] and np.sum(filtered_points[i]**2) > max_dist_sq:
+                filtered_points[i], validity_mask[i] = np.nan, False
+        return filtered_points, validity_mask.tolist()
 
-        rospy.loginfo("Live Grasp Detector node running. Waiting for data...")
-
-    def _init_gui(self):
-        cv2.namedWindow(self.cv_window_name, cv2.WINDOW_AUTOSIZE)
-        cv2.createTrackbar('OpenPose Conf', self.cv_window_name, 20, 100, nothing) 
-        cv2.createTrackbar('Voting Conf', self.cv_window_name, 60, 100, nothing)
-
-    def _init_state_variables(self):
-        self.fx, self.fy, self.cx, self.cy = None, None, None, None
-        self.camera_info_received = False
-        self._vote_buffer = deque(maxlen=VOTING_WINDOW_SIZE)
-        self._current_stable_prediction: Optional[str] = None
-        self._min_votes_for_decision = int(VOTING_WINDOW_SIZE * VOTING_AGREEMENT_PERCENTAGE)
-
-    def _draw_gui(self, frame, status, raw_label, confidence, voted_status, keypoints_2d):
-        # Iscrtaj kostur ruke
-        if keypoints_2d is not None:
+    def _filter_3d_by_limb_length(self, keypoints_3d_rel, validity_mask):
+        points, mask = keypoints_3d_rel.copy(), list(validity_mask)
+        for _ in range(3):
+            removed = 0
             for p1_idx, p2_idx in HAND_CONNECTIONS:
-                if not np.isnan(keypoints_2d[p1_idx]).any() and not np.isnan(keypoints_2d[p2_idx]).any():
-                    p1 = tuple(keypoints_2d[p1_idx].astype(int)); p2 = tuple(keypoints_2d[p2_idx].astype(int))
-                    cv2.line(frame, p1, p2, (0, 255, 0), 2)
-            for i in range(keypoints_2d.shape[0]):
-                if not np.isnan(keypoints_2d[i]).any():
-                    pt = tuple(keypoints_2d[i].astype(int)); cv2.circle(frame, pt, 4, (0, 0, 255), -1)
-        
-        # Ispiši status
-        cv2.putText(frame, f"Status: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if "ERROR" in status else (255, 255, 255), 2)
-        cv2.putText(frame, f"Raw: {raw_label.upper()} ({confidence:.2f})", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(display_frame, f"Voted: {voted_status}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        
-        cv2.imshow(self.cv_window_name, frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            self.is_shutdown = True
-            rospy.signal_shutdown("User pressed 'q' to exit.")
+                if mask[p1_idx] and mask[p2_idx]:
+                    if np.sum((points[p1_idx] - points[p2_idx])**2) > MAX_LIMB_LENGTH_M**2:
+                        d1, d2 = np.sum(points[p1_idx]**2), np.sum(points[p2_idx]**2)
+                        remove_idx = p1_idx if d1 > d2 else p2_idx
+                        if mask[remove_idx]:
+                            points[remove_idx], mask[remove_idx] = np.nan, False
+                            removed += 1
+            if removed == 0:
+                break
+        return points, mask
 
-    def _get_depth_for_point(self, depth_map_mm, point_2d):
-        u, v = int(round(point_2d[0])), int(round(point_2d[1]))
-        if not (0 <= v < depth_map_mm.shape[0] and 0 <= u < depth_map_mm.shape[1]): return np.nan
-        
-        depth_val = depth_map_mm[v, u]
-        if VALID_DEPTH_THRESHOLD_MM[0] < depth_val < VALID_DEPTH_THRESHOLD_MM[1]:
-            return float(depth_val) / 1000.0
-        return np.nan
 
-    def _callback(self, rgb_msg, depth_msg, info_msg):
-        if not self.camera_info_received:
-            K=info_msg.K; self.fx,self.fy,self.cx,self.cy=K[0],K[4],K[2],K[5]; self.camera_info_received=True
-            rospy.loginfo_once(f"Camera intrinsics received")
+class PoseDetectorNode:
+    def __init__(self):
+        rospy.init_node('pose_detector_node')
 
-        display_frame = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
-        status, raw_label, confidence, voted_status, keypoints_2d = "OK", "N/A", 0.0, "Waiting...", None
+        model_type = rospy.get_param('~model_type', 'xgboost')
+
+        models_dir = os.path.join(SRC_DIR, 'models', model_type)
+        model_path = os.path.join(models_dir, f'{model_type}_model.joblib')
+        encoder_path = os.path.join(models_dir, f'label_encoder_{model_type}.joblib')
+        hand_model_path = os.path.join(OPENPOSE_PATH, "model", "hand_pose_model.pth")
+
+        self.classifier_logic = HandPoseClassifierLogic(model_path, encoder_path, hand_model_path)
 
         try:
-            depth_frame = self.bridge.imgmsg_to_cv2(depth_msg, "16UC1")
-            openpose_conf = cv2.getTrackbarPos('OpenPose Conf', self.cv_window_name) / 100.0
-            
-            # 1. Detekcija i filtriranje 2D točaka
-            all_peaks = self._hand_estimator(rgb_frame)
-            if not isinstance(all_peaks, np.ndarray) or all_peaks.shape[0]==0: raise ValueError("No hand detected")
-            
-            keypoints_2d = np.full((21, 2), np.nan)
-            for i in range(min(21, all_peaks.shape[0])):
-                if all_peaks[i, 2] >= openpose_conf: keypoints_2d[i] = all_peaks[i, :2]
+            cam_info = rospy.wait_for_message(CAMERA_INFO_TOPIC, CameraInfo, timeout=10)
+        except rospy.ROSException:
+            rospy.logfatal("Timeout waiting for camera_info. Is the camera running?")
+            sys.exit(1)
 
-            # 2. Projekcija u 3D
-            z = np.array([self._get_depth_for_point(depth_frame, p) for p in keypoints_2d])
-            x = (keypoints_2d[:, 0] - self.cx) * z / self.fx
-            y = (keypoints_2d[:, 1] - self.cy) * z / self.fy
-            keypoints_3d = np.stack((x, y, z), axis=-1)
+        self.classifier_logic.set_camera_intrinsics(cam_info.K[0], cam_info.K[4], cam_info.K[2], cam_info.K[5])
 
-            # 3. Konverzija u relativne koordinate i predikcija
-            if np.isnan(keypoints_3d[0]).any(): raise ValueError("Wrist not in 3D")
-            keypoints_rel = keypoints_3d - keypoints_3d[0]
-            if np.sum(~np.isnan(keypoints_rel)) < MIN_VALID_KEYPOINTS*3: raise ValueError("Not enough 3D points")
+        self.bridge = CvBridge()
+        self.vote_buffer = deque(maxlen=rospy.get_param('~voter_window', 15))
+        self.min_votes = int(self.vote_buffer.maxlen * rospy.get_param('~voter_agreement', 0.8))
+        self.last_published_grasp = None
 
-            features = pd.DataFrame([keypoints_rel.flatten()], columns=self.feature_names)
-            pred_num = self.model.predict(features)
-            raw_label = self.label_encoder.inverse_transform(pred_num)[0]
-            probs = self.model.predict_proba(features)[0]
-            confidence = probs[pred_num[0]]
+        self.grasp_pub = rospy.Publisher("/pose2grasp/grasp_type", String, queue_size=10)
 
+        rgb_sub = message_filters.Subscriber(CAMERA_RGB_TOPIC, Image)
+        depth_sub = message_filters.Subscriber(CAMERA_DEPTH_TOPIC, Image)
+        ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub], 10, 0.1)
+        ts.registerCallback(self.synchronized_callback)
+
+        rospy.loginfo("Pose Detector Node initialized and running.")
+
+    def synchronized_callback(self, rgb_msg, depth_msg):
+        try:
+            rgb = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
+            depth = self.bridge.imgmsg_to_cv2(depth_msg, "16UC1")
         except Exception as e:
-            status = f"ERROR: {e}"
+            rospy.logerr(f"Bridge conversion error: {e}")
+            return
 
-        # 4. Logika glasanja
-        voting_conf = cv2.getTrackbarPos('Voting Conf', self.cv_window_name) / 100.0
-        if status == "OK" and confidence >= voting_conf: self._vote_buffer.append(raw_label)
-        
-        if len(self._vote_buffer) == self._vote_buffer.maxlen:
-            counts = Counter(self._vote_buffer); most_common, num = counts.most_common(1)[0]
-            if num >= self._min_votes_for_decision:
-                voted_status = f"Stable: {most_common}"
-                if self._current_stable_prediction != most_common:
-                    self._current_stable_prediction = most_common
-                    self.grasp_decision_publisher.publish(String(data=most_common))
-            else:
-                voted_status = "Unstable"; self._current_stable_prediction = None
-        else:
-            voted_status = f"Collecting ({len(self._vote_buffer)}/{VOTING_WINDOW_SIZE})"
+        label = self.classifier_logic.process_frame(rgb, depth)
+        self.vote_buffer.append(label)
 
-        # 5. Crtanje GUI-a
-        self._draw_gui(display_frame, status, raw_label, confidence, voted_status, keypoints_2d)
+        if len(self.vote_buffer) < self.vote_buffer.maxlen:
+            return
 
-if __name__ == "__main__":
+        counts = Counter(self.vote_buffer)
+        most_common, count = counts.most_common(1)[0]
+
+        if most_common is not None and count >= self.min_votes:
+            if most_common != self.last_published_grasp:
+                self.grasp_pub.publish(String(data=most_common))
+                self.last_published_grasp = most_common
+                rospy.loginfo(f"Published new stable grasp: {most_common}")
+
+
+if __name__ == '__main__':
     try:
-        detector = LiveGraspDetector()
+        PoseDetectorNode()
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
-    finally:
-        cv2.destroyAllWindows()
-        print("\nLive Grasp Detector shutting down.")

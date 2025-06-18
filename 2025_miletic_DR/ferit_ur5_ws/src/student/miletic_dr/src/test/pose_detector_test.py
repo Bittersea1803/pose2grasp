@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# works with lab cam
+
 import os
 import sys
 import threading
@@ -33,9 +35,14 @@ except ImportError as e:
     sys.exit(1)
 
 
-RGB_TOPIC = "/camera/rgb/image_rect_color"
-DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
-CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+# CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
+# CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
+# CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+
+CAMERA_RGB_TOPIC = "/camera/color/image_raw"
+CAMERA_DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw"
+CAMERA_INFO_TOPIC = "/camera/color/camera_info"
+
 VALID_DEPTH_THRESHOLD_MM = (400, 1500)
 OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
 HAND_CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]]
@@ -123,8 +130,8 @@ class LiveGraspClassifierApp:
         try:
             info_msg = rospy.wait_for_message(CAMERA_INFO_TOPIC, CameraInfo, timeout=10)
             self.fx, self.fy, self.cx, self.cy = info_msg.K[0], info_msg.K[4], info_msg.K[2], info_msg.K[5]
-            rgb_sub = message_filters.Subscriber(RGB_TOPIC, Image)
-            depth_sub = message_filters.Subscriber(DEPTH_TOPIC, Image)
+            rgb_sub = message_filters.Subscriber(CAMERA_RGB_TOPIC, Image)
+            depth_sub = message_filters.Subscriber(CAMERA_DEPTH_TOPIC, Image)
             ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub], 10, 0.1)
             ts.registerCallback(self.ros_callback)
         except rospy.ROSException as e:
@@ -327,6 +334,8 @@ class LiveGraspClassifierApp:
 if __name__ == '__main__':
     try:
         app = LiveGraspClassifierApp()
+        print("Starting Live Grasp Classifier GUI...")
         app.run()
+        print("Live Grasp Classifier GUI closed.")
     except Exception as e:
         rospy.logfatal(f"Unhandled exception in main: {e}")

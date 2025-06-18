@@ -73,17 +73,25 @@ class ObjectDetectorLogic:
         if not pcd_down.has_points():
             return None, "Downsampled point cloud is empty", []
 
+        plane_detected = False
+        plane_cloud = o3d.geometry.PointCloud()
         try:
             plane_model, inliers = pcd_down.segment_plane(
                 distance_threshold=self.PLANE_DIST_THRESHOLD, ransac_n=3, num_iterations=1000)
+            
+            if len(inliers) > self.DBSCAN_MIN_POINTS:
+                plane_detected = True
+                plane_cloud = pcd_down.select_by_index(inliers)
+                objects_cloud = pcd_down.select_by_index(inliers, invert=True)
+                plane_cloud.paint_uniform_color([0.7, 0.7, 0.7])
+                geometries_to_draw = [plane_cloud]
+            else:
+                objects_cloud = pcd_down
+                geometries_to_draw = []
         except RuntimeError:
-            return None, "Not enough points for plane segmentation", [pcd_down]
+            objects_cloud = pcd_down
+            geometries_to_draw = []
 
-        plane_cloud = pcd_down.select_by_index(inliers)
-        objects_cloud = pcd_down.select_by_index(inliers, invert=True)
-        plane_cloud.paint_uniform_color([0.7, 0.7, 0.7])
-        geometries_to_draw = [plane_cloud]
-        
         if not objects_cloud.has_points():
             return None, "No points left after removing plane", geometries_to_draw
 
@@ -106,17 +114,77 @@ class ObjectDetectorLogic:
         valid_clusters.sort(key=lambda x: len(x.points), reverse=True)
         largest_cluster = valid_clusters[0]
         
-        obb = largest_cluster.get_oriented_bounding_box()
-        obb.color = (0, 1, 0)
-        geometries_to_draw.extend(valid_clusters)
-        geometries_to_draw.append(obb)
+        ### MODIFICATION ###: Entire Bounding Box logic is replaced
+        if plane_detected:
+            # --- 1. Create a coordinate system based on the plane normal ---
+            plane_normal = np.array(plane_model[:3])
+            # Ensure normal points "up" towards the camera (which is at origin)
+            if np.dot(plane_normal, -plane_cloud.get_center()) < 0:
+                plane_normal = -plane_normal
 
-        center = obb.get_center()
+            z_axis = plane_normal / np.linalg.norm(plane_normal)
+
+            # To create other axes, take cross product with a world vector
+            # We must handle the case where the normal is parallel to the world vector
+            ref_vec = np.array([1., 0., 0.])
+            if np.abs(np.dot(z_axis, ref_vec)) > 0.9:
+                ref_vec = np.array([0., 1., 0.])
+            
+            x_axis = np.cross(z_axis, ref_vec)
+            x_axis /= np.linalg.norm(x_axis)
+            y_axis = np.cross(z_axis, x_axis)
+            
+            # This is the rotation matrix for the new, plane-aligned coordinate system
+            rotation_matrix = np.stack([x_axis, y_axis, z_axis], axis=1)
+
+            # --- 2. Transform object points to this new coordinate system ---
+            cluster_points = np.asarray(largest_cluster.points)
+            transformed_points = np.dot(cluster_points, rotation_matrix) # More efficient than R.T @ p.T
+
+            # --- 3. Find the axis-aligned bounds in the new system ---
+            min_bound = np.min(transformed_points, axis=0)
+            max_bound = np.max(transformed_points, axis=0)
+            
+            # The bottom of the box should be on the plane. Find plane's level in the new system.
+            plane_center_transformed = np.dot(plane_cloud.get_center(), rotation_matrix)
+            plane_level_z = plane_center_transformed[2]
+            
+            # --- 4. Define the final box's center and size (extent) ---
+            # The box extent is its size along its own local axes
+            extent = np.array([
+                max_bound[0] - min_bound[0],
+                max_bound[1] - min_bound[1],
+                max_bound[2] - plane_level_z  # Height is from plane to object top
+            ])
+
+            # The box center in the new coordinate system
+            center_local = np.array([
+                (max_bound[0] + min_bound[0]) / 2,
+                (max_bound[1] + min_bound[1]) / 2,
+                plane_level_z + extent[2] / 2 # Center of the height
+            ])
+
+            # --- 5. Transform center back to world coordinates and create OBB ---
+            center_world = np.dot(center_local, rotation_matrix.T) # Inverse rotation
+            
+            # Create the oriented bounding box directly from center, rotation, and extent
+            final_obb = o3d.geometry.OrientedBoundingBox(center_world, rotation_matrix, extent)
+
+        else: # Fallback if no plane is detected
+            final_obb = largest_cluster.get_oriented_bounding_box()
+        
+        final_obb.color = (0, 1, 0)
+        geometries_to_draw.extend(valid_clusters)
+        geometries_to_draw.append(final_obb)
+
+        center = final_obb.get_center()
         pose_msg = PoseStamped()
         pose_msg.header.frame_id = "camera_rgb_optical_frame"
         pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z = center
+        
+        # Convert rotation matrix to quaternion for the pose message
         transform_matrix = np.identity(4)
-        transform_matrix[:3, :3] = obb.R
+        transform_matrix[:3, :3] = final_obb.R
         quaternion = quaternion_from_matrix(transform_matrix)
         pose_msg.pose.orientation.x, pose_msg.pose.orientation.y, pose_msg.pose.orientation.z, pose_msg.pose.orientation.w = quaternion
 
@@ -139,7 +207,7 @@ class ObjectDetectorGUI:
         self._latest_rgb = None
         self._latest_depth = None
         self.detector_logic = None
-        self.pose_publisher = rospy.Publisher(OBJECT_POSE_TOPIC, PoseStamped, queue_size=1)
+        self.pose_publisher = rospy.Publisher(OBJECT_POSE_TOPIC, PoseStamped, queue_size=10)
         self._initialize_ros_and_logic()
         
         self._gui_update_loop()
@@ -161,7 +229,7 @@ class ObjectDetectorGUI:
 
     def _initialize_ros_and_logic(self):
         try:
-            info_msg = rospy.wait_for_message(CAMERA_INFO_TOPIC, CameraInfo, timeout=5)
+            info_msg = rospy.wait_for_message(CAMERA_INFO_TOPIC, CameraInfo, timeout=10)
             self.detector_logic = ObjectDetectorLogic(camera_intrinsics=info_msg)
             
             rgb_sub = message_filters.Subscriber(CAMERA_RGB_TOPIC, Image)
@@ -186,7 +254,7 @@ class ObjectDetectorGUI:
         with self._data_lock:
             if self._latest_depth is None or self._latest_rgb is None:
                 self.status_var.set("Status: Error - No image data available.")
-                self.detect_button.config(state=tk.NORMAL)
+                self.root.after(0, lambda: self.detect_button.config(state=tk.NORMAL))
                 return
             depth_image, rgb_image = self._latest_depth.copy(), self._latest_rgb.copy()
 
@@ -199,17 +267,17 @@ class ObjectDetectorGUI:
                 self.pose_publisher.publish(pose_msg)
                 rospy.loginfo(f"Published object pose: {status_text}")
             
-            self.status_var.set(f"Status: {status_text}. Close 3D window to continue.")
+            self.root.after(0, lambda: self.status_var.set(f"Status: {status_text}. Close 3D window to continue."))
             
             if geoms_to_draw:
                 o3d.visualization.draw_geometries(geoms_to_draw, window_name="3D Detection Result")
 
         except Exception as e:
             rospy.logerr(f"Object detection pipeline failed: {e}")
-            self.status_var.set(f"Status: Error - {e}")
+            self.root.after(0, lambda: self.status_var.set(f"Status: Error - {e}"))
         finally:
-            self.status_var.set("Status: Ready.")
-            self.detect_button.config(state=tk.NORMAL)
+            self.root.after(0, lambda: self.status_var.set("Status: Ready."))
+            self.root.after(0, lambda: self.detect_button.config(state=tk.NORMAL))
 
     def _gui_update_loop(self):
         with self._data_lock:

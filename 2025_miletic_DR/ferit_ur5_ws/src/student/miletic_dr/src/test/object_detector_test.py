@@ -114,75 +114,72 @@ class ObjectDetectorLogic:
         valid_clusters.sort(key=lambda x: len(x.points), reverse=True)
         largest_cluster = valid_clusters[0]
         
-        ### MODIFICATION ###: Entire Bounding Box logic is replaced
         if plane_detected:
-            # --- 1. Create a coordinate system based on the plane normal ---
             plane_normal = np.array(plane_model[:3])
-            # Ensure normal points "up" towards the camera (which is at origin)
             if np.dot(plane_normal, -plane_cloud.get_center()) < 0:
                 plane_normal = -plane_normal
-
             z_axis = plane_normal / np.linalg.norm(plane_normal)
-
-            # To create other axes, take cross product with a world vector
-            # We must handle the case where the normal is parallel to the world vector
             ref_vec = np.array([1., 0., 0.])
             if np.abs(np.dot(z_axis, ref_vec)) > 0.9:
                 ref_vec = np.array([0., 1., 0.])
-            
             x_axis = np.cross(z_axis, ref_vec)
             x_axis /= np.linalg.norm(x_axis)
             y_axis = np.cross(z_axis, x_axis)
-            
-            # This is the rotation matrix for the new, plane-aligned coordinate system
             rotation_matrix = np.stack([x_axis, y_axis, z_axis], axis=1)
 
-            # --- 2. Transform object points to this new coordinate system ---
             cluster_points = np.asarray(largest_cluster.points)
-            transformed_points = np.dot(cluster_points, rotation_matrix) # More efficient than R.T @ p.T
-
-            # --- 3. Find the axis-aligned bounds in the new system ---
+            transformed_points = np.dot(cluster_points, rotation_matrix)
             min_bound = np.min(transformed_points, axis=0)
             max_bound = np.max(transformed_points, axis=0)
             
-            # The bottom of the box should be on the plane. Find plane's level in the new system.
             plane_center_transformed = np.dot(plane_cloud.get_center(), rotation_matrix)
             plane_level_z = plane_center_transformed[2]
             
-            # --- 4. Define the final box's center and size (extent) ---
-            # The box extent is its size along its own local axes
             extent = np.array([
                 max_bound[0] - min_bound[0],
                 max_bound[1] - min_bound[1],
-                max_bound[2] - plane_level_z  # Height is from plane to object top
+                max_bound[2] - plane_level_z
             ])
-
-            # The box center in the new coordinate system
             center_local = np.array([
                 (max_bound[0] + min_bound[0]) / 2,
                 (max_bound[1] + min_bound[1]) / 2,
-                plane_level_z + extent[2] / 2 # Center of the height
+                plane_level_z + extent[2] / 2
             ])
-
-            # --- 5. Transform center back to world coordinates and create OBB ---
-            center_world = np.dot(center_local, rotation_matrix.T) # Inverse rotation
-            
-            # Create the oriented bounding box directly from center, rotation, and extent
+            center_world = np.dot(center_local, rotation_matrix.T)
             final_obb = o3d.geometry.OrientedBoundingBox(center_world, rotation_matrix, extent)
-
-        else: # Fallback if no plane is detected
+        else:
             final_obb = largest_cluster.get_oriented_bounding_box()
         
         final_obb.color = (0, 1, 0)
         geometries_to_draw.extend(valid_clusters)
         geometries_to_draw.append(final_obb)
-
+        
+        ### MODIFICATION: Define and draw the center point and its coordinate system ###
         center = final_obb.get_center()
+
+        # 1. Create a sphere mesh to visually mark the center point.
+        center_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.007) # 7mm radius sphere
+        center_marker.translate(center)
+        center_marker.paint_uniform_color([1, 0, 0]) # Paint it red
+        geometries_to_draw.append(center_marker)
+
+        # 2. Create a coordinate frame mesh to show the BBox's orientation.
+        # X-axis is Red, Y is Green, Z is Blue.
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+            size=0.05, # 5cm long axes
+            origin=[0, 0, 0] # Create at origin before moving
+        )
+        # Apply the same rotation and translation as the bounding box.
+        coord_frame.rotate(final_obb.R, center=[0, 0, 0])
+        coord_frame.translate(center)
+        geometries_to_draw.append(coord_frame)
+        ### END OF MODIFICATION ###
+
+        # The PoseStamped message numerically defines the center and coordinate system
         pose_msg = PoseStamped()
         pose_msg.header.frame_id = "camera_rgb_optical_frame"
         pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z = center
         
-        # Convert rotation matrix to quaternion for the pose message
         transform_matrix = np.identity(4)
         transform_matrix[:3, :3] = final_obb.R
         quaternion = quaternion_from_matrix(transform_matrix)

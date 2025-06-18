@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+#works in lab
+
 import os
 import sys
 import threading
@@ -17,10 +19,15 @@ from tkinter import ttk, messagebox
 from PIL import Image as PILImage, ImageTk
 from tf.transformations import quaternion_from_matrix
 
-# --- Constants ---
-RGB_TOPIC = "/camera/rgb/image_rect_color"
-DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
-CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+
+# CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
+# CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
+# CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+
+CAMERA_RGB_TOPIC = "/camera/color/image_raw"
+CAMERA_DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw"
+CAMERA_INFO_TOPIC = "/camera/color/camera_info"
+
 OBJECT_POSE_TOPIC = "/plane_object_detector/biggest_object_position"
 
 
@@ -157,8 +164,8 @@ class ObjectDetectorGUI:
             info_msg = rospy.wait_for_message(CAMERA_INFO_TOPIC, CameraInfo, timeout=5)
             self.detector_logic = ObjectDetectorLogic(camera_intrinsics=info_msg)
             
-            rgb_sub = message_filters.Subscriber(RGB_TOPIC, Image)
-            depth_sub = message_filters.Subscriber(DEPTH_TOPIC, Image)
+            rgb_sub = message_filters.Subscriber(CAMERA_RGB_TOPIC, Image)
+            depth_sub = message_filters.Subscriber(CAMERA_DEPTH_TOPIC, Image)
             ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub], 10, 0.1)
             ts.registerCallback(self.ros_callback)
         except Exception as e:

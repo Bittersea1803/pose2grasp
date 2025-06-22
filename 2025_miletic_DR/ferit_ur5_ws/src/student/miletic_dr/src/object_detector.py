@@ -13,10 +13,17 @@ from tf.transformations import quaternion_from_matrix
 
 from miletic_dr.msg import DetectedObject
 
+#TODO: Čita 
+
+# CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
+# CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
+# CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
 
 CAMERA_RGB_TOPIC = "/camera/color/image_raw"
 CAMERA_DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw"
-CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+CAMERA_INFO_TOPIC = "/camera/color/camera_info"
+
+
 OBJECT_DATA_TOPIC = "/miletic_dr/detected_object" 
 FRAME_ID = "camera_rgb_optical_frame"
 

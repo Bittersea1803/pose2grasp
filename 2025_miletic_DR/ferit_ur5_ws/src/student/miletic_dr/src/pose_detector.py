@@ -24,12 +24,18 @@ except ImportError as e:
     rospy.logfatal(f"Could not import OpenPose. Provjerite putanju u pose_detector.py. Greška: {e}")
     sys.exit(1)
 
+
+# CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
+# CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
+# CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+
 CAMERA_RGB_TOPIC = "/camera/color/image_raw"
 CAMERA_DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw"
 CAMERA_INFO_TOPIC = "/camera/color/camera_info"
+
 GRASP_TYPE_TOPIC = "/miletic_dr/pose_type"
 
-VALID_DEPTH_THRESHOLD_MM = (400, 1500)
+VALID_DEPTH_THRESHOLD_MM = (200, 1000)
 OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
 MIN_VALID_KEYPOINTS_FOR_PREDICTION = 15
 OUTLIER_XYZ_THRESHOLD_M = 0.25
@@ -157,7 +163,8 @@ class PoseDetectorNode:
 
         rgb_sub = message_filters.Subscriber(CAMERA_RGB_TOPIC, Image)
         depth_sub = message_filters.Subscriber(CAMERA_DEPTH_TOPIC, Image)
-        ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub], 10, 0.1)
+        # ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub], 10, 0.1)
+        ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub], queue_size=2, slop=0.1)
         ts.registerCallback(self.synchronized_callback)
 
         rospy.loginfo("Pose Detector Node initialized and running.")
@@ -169,8 +176,14 @@ class PoseDetectorNode:
         except Exception as e:
             rospy.logerr(f"Bridge conversion error: {e}")
             return
+        
+        # new_width = rgb_image.shape[1] // 2
+        # new_height = rgb_image.shape[0] // 2
+        # rgb_image_small = cv2.resize(rgb_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
         label, debug_data = self.classifier_logic.process_frame(rgb_image, depth_image)
+
+        rospy.loginfo(f"Processed frame: label={label}")
         
         # --- Voting mehanizam ---
         if label is None:

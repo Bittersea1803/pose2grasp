@@ -20,9 +20,15 @@ from tf.transformations import quaternion_from_matrix
 GRIPPER_MESH_PATH = "mesh.ply"
 
 # --- ROS Topici - HOME ---
-CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
-CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
-CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+# CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
+# CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
+# CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
+
+CAMERA_RGB_TOPIC = "/camera/color/image_raw"
+CAMERA_DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw"
+CAMERA_INFO_TOPIC = "/camera/color/camera_info"
+
+
 OBJECT_POSE_TOPIC = "/plane_object_detector/biggest_object_position"
 
 

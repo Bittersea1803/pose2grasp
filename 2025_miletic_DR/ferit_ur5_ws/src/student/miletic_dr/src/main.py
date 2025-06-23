@@ -26,7 +26,10 @@ class GraspExecutor:
             package_path = rospack.get_path('miletic_dr')
             config_path = os.path.join(package_path, 'config')
             self.T_C_6 = np.load(os.path.join(config_path, 'T_C_6.npy'))
-            self.T_TCP_6 = np.load(os.path.join(config_path, 'T_TCP_6.npy'))
+            self.T_TCP_6_scissor = np.load(os.path.join(config_path, 'T_TCP_6.npy'))
+            self.T_TCP_6 = self.T_TCP_6_scissor.copy()
+            self.T_TCP_6[0, 3] = 0.0  # X = 0
+            self.T_TCP_6[1, 3] = 0.0  # Y = 0
             rospy.loginfo("Transformation matrices T_C_6 and T_TCP_6 loaded successfully.")
         except Exception as e:
             rospy.logfatal(f"Failed to load transformation matrices: {e}")
@@ -41,6 +44,7 @@ class GraspExecutor:
         rospy.loginfo("Step 1: Loading data from input files...")
         script_dir = os.path.dirname(os.path.abspath(__file__))
         pose_type = self._load_pose_file(os.path.join(script_dir, POSE_FILENAME))
+        self.grasp = pose_type
         object_data = self._load_object_file(os.path.join(script_dir, OBJECT_FILENAME))
         if not pose_type or not object_data:
             rospy.logfatal("Failed to load input files. Aborting.")
@@ -75,7 +79,30 @@ class GraspExecutor:
 
         T_B_TCP = self._calculate_target_tcp_pose(T_B_Object, np.array(object_data['dimensions']), pose_type)
         
+        if self.grasp.lower() == "scissor":
+            self.T_TCP_6 = self.T_TCP_6_scissor.copy()
+            rospy.loginfo("Using scissor gripper configuration.")
+
+            # Matrica rotacije od 90 stupnjeva oko Z osi (ugrađena direktno)
+            R_z_90 = np.array([
+                [0, -1, 0],
+                [1,  0, 0],
+                [0,  0, 1]
+            ])
+
+            # Stvaranje homogene transformacijske matrice za rotaciju
+            # Inicijalno 4x4 jedinična matrica
+            T_rot_z_90 = np.eye(4)
+            # Postavljanje matrice rotacije u gornji lijevi 3x3 dio
+            T_rot_z_90[:3, :3] = R_z_90
+
+            # Dodaj rotaciju od 90 stupnjeva oko Z (TCP-a)
+            self.T_TCP_6 = self.T_TCP_6 @ T_rot_z_90
+        else:
+            self.T_TCP_6 = self.T_TCP_6
+
         T_B_6 = T_B_TCP @ np.linalg.inv(self.T_TCP_6)
+
         rospy.loginfo("Calculated T_B_6 (target flange pose) from T_B_TCP.")
 
         rospy.loginfo("Grasp pose calculated. Skipping approach/retreat poses.")
@@ -106,13 +133,6 @@ class GraspExecutor:
     def _calculate_target_tcp_pose(self, T_B_O, dims, pose_type):
         R_B_O = T_B_O[:3, :3]
         target_position = T_B_O[:3, 3].copy()
-        
-        if pose_type.lower() == "scissor":
-            rospy.loginfo("Applying positional offset for Scissor Grasp to target the object's edge.")
-            object_x_axis_in_base = R_B_O[:, 0]
-            object_x_dimension = dims[0]
-            offset_vector = object_x_axis_in_base * (object_x_dimension / 2.0)
-            target_position -= offset_vector
             
         rospy.loginfo("Calculating orientation for the gripper based on 'NO Y on Y' rule.")
         
@@ -136,11 +156,6 @@ class GraspExecutor:
         gripper_x_axis /= np.linalg.norm(gripper_x_axis)
         gripper_y_axis /= np.linalg.norm(gripper_y_axis)
         gripper_z_axis /= np.linalg.norm(gripper_z_axis)
-        
-        MANUAL_X_OFFSET_METERS = 0.065 
-        
-        offset_vector = gripper_x_axis * MANUAL_X_OFFSET_METERS
-        target_position += offset_vector
 
         R_B_TCP = np.stack([gripper_x_axis, gripper_y_axis, gripper_z_axis], axis=1)
         

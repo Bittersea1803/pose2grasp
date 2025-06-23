@@ -125,8 +125,8 @@ class ObjectDetectorLogic:
             else:
                 angle_for_y_axis_deg, obb_extent_2d = angle_deg + 90, [height, width]
 
-            angle_rad = np.deg2rad(angle_for_y_axis_deg)
-            c, s = np.cos(angle_rad), np.sin(angle_rad)
+            angle_for_x_axis_rad = np.deg2rad(angle_for_y_axis_deg - 90.0)
+            c, s = np.cos(angle_for_x_axis_rad), np.sin(angle_for_x_axis_rad)
             R_on_plane = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
             R_plane_to_world = R_world_to_plane_temp.T

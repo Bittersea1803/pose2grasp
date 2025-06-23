@@ -11,7 +11,6 @@ from tf.transformations import quaternion_matrix
 
 from core.real_ur5_controller import UR5Controller
 
-
 POSE_FILENAME = "pose_result.txt"
 OBJECT_FILENAME = "object_data.json"
 
@@ -34,7 +33,8 @@ class GraspExecutor:
             sys.exit(1)
         self.robot_controller = UR5Controller()
         rospy.loginfo("UR5 Controller initialized.")
-        # self.robot_controller.activate_gripper()
+        # Activate the gripper when the node starts
+        self.robot_controller.activate_gripper()
 
     def run(self):
         rospy.loginfo("--- Starting Grasp Execution Sequence ---")
@@ -54,6 +54,7 @@ class GraspExecutor:
         self._execute_grasp_motion(poses, pose_type)
         rospy.loginfo("Step 4: Grasp attempt finished. Moving back to HOME pose.")
         self.move_to_home_pose()
+        self.robot_controller.send_gripper_command("basic", position=0)  # Ensure gripper is open
         rospy.loginfo("--- Grasp Execution Sequence Complete ---")
         rospy.signal_shutdown("Task complete.")
 
@@ -82,19 +83,22 @@ class GraspExecutor:
     
     def _execute_grasp_motion(self, poses, pose_type):
         rospy.loginfo("--- Starting physical grasp motion ---")
-        # self.robot_controller.send_gripper_command(pose_type, position=0) # Open gripper
+        # Open the gripper before moving to the object
+        self.robot_controller.send_gripper_command(pose_type, position=0) 
+        rospy.sleep(1.0) # Give gripper time to open
         
         rospy.loginfo("Moving directly to GRASP pose.")
         if not self._move_to_goal(poses["grasp"], "GRASP"): 
             rospy.logerr("Failed to move to GRASP pose.")
             return
 
-        # self.robot_controller.send_gripper_command(pose_type, position=255) # Close gripper
-        rospy.sleep(2.0)
+        # Close the gripper to grasp the object
+        self.robot_controller.send_gripper_command(pose_type, position=255) 
+        rospy.sleep(2.0) # Wait for gripper to close
 
-
+        # Lift the object
         T_B_6_lift = poses["grasp"].copy()
-        T_B_6_lift[2, 3] += 0.15 # Z + 10
+        T_B_6_lift[2, 3] += 0.15 # Z + 15cm
         self._move_to_goal(T_B_6_lift, "LIFT")
 
         rospy.loginfo("--- Grasp motion sequence finished successfully! ---")
@@ -110,9 +114,22 @@ class GraspExecutor:
             offset_vector = object_x_axis_in_base * (object_x_dimension / 2.0)
             target_position -= offset_vector
             
-        rospy.loginfo("Calculating orientation for the gripper.")
-        gripper_z_axis = -R_B_O[:, 2] # Gripper's Z should point opposite to object's Z
-        gripper_y_axis = R_B_O[:, 1]  # Gripper's Y aligned with object's Y
+        rospy.loginfo("Calculating orientation for the gripper based on 'NO Y on Y' rule.")
+        
+        # The object's axes are:
+        # R_B_O[:, 0] = Object's X-axis (short side)
+        # R_B_O[:, 1] = Object's Y-axis (long side)
+        # R_B_O[:, 2] = Object's Z-axis (pointing up)
+
+        # 1. Define Gripper's approach vector (Z-axis). This is correct.
+        gripper_z_axis = -R_B_O[:, 2]
+
+        # 2. Define Gripper's finger alignment (Y-axis) to align with the object's SHORT side (X-axis).
+        # This is the direct implementation of your instruction.
+        gripper_y_axis = R_B_O[:, 0]
+
+        # 3. Define the Gripper's perpendicular axis (X-axis) using the cross product
+        # to ensure a valid, right-handed coordinate frame.
         gripper_x_axis = np.cross(gripper_y_axis, gripper_z_axis)
         
         # Normalize axes to ensure a valid rotation matrix
@@ -120,6 +137,11 @@ class GraspExecutor:
         gripper_y_axis /= np.linalg.norm(gripper_y_axis)
         gripper_z_axis /= np.linalg.norm(gripper_z_axis)
         
+        MANUAL_X_OFFSET_METERS = 0.065 
+        
+        offset_vector = gripper_x_axis * MANUAL_X_OFFSET_METERS
+        target_position += offset_vector
+
         R_B_TCP = np.stack([gripper_x_axis, gripper_y_axis, gripper_z_axis], axis=1)
         
         T_B_TCP = np.identity(4)
@@ -145,9 +167,6 @@ class GraspExecutor:
         else:
             rospy.logerr(f"No IK solution found for '{name}' pose. Aborting.")
             return False
-        
-
-
 
     def move_to_home_pose(self):
         rospy.loginfo("Moving to final HOME pose.")

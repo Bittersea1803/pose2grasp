@@ -23,12 +23,14 @@ OUTPUT_FILENAME = "pose_result.txt"
 HOME_POSE_JOINTS = np.deg2rad([-89, -6, -140, -54, 91, 45])
 
 # -- Path Configuration
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PACKAGE_ROOT_DIR = os.path.join(SCRIPT_DIR, '..', '..') 
-OPENPOSE_PATH = os.path.join(PACKAGE_ROOT_DIR, 'src', 'pytorch-openpose')
-sys.path.append(OPENPOSE_PATH)
-from src.hand import Hand
-rospy.loginfo("Successfully configured paths and imported OpenPose.")
+try:
+    PACKAGE_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    OPENPOSE_PATH = os.path.join(PACKAGE_ROOT_DIR, 'pytorch-openpose')
+    sys.path.append(OPENPOSE_PATH)
+    from src.hand import Hand
+except ImportError as e:
+    rospy.logfatal(f"Could not import OpenPose. Greška: {e}")
+    sys.exit(1)
 
 VALID_DEPTH_THRESHOLD_MM = (400, 1500)
 OPENPOSE_CONFIDENCE_THRESHOLD = 0.2
@@ -140,8 +142,8 @@ class PoseDetectorNode:
         model_type = 'xgboost'
         rospy.loginfo(f"Using classifier model type: {model_type}")
         
-        src_dir = os.path.dirname(os.path.abspath(__file__))
-        models_dir = os.path.join(src_dir, 'models', model_type)
+        self.src_dir = os.path.dirname(os.path.abspath(__file__))
+        models_dir = os.path.join(self.src_dir, 'models', model_type)
         model_path = os.path.join(models_dir, f'{model_type}_model.joblib')
         encoder_path = os.path.join(models_dir, f'label_encoder_{model_type}.joblib')
         hand_model_path = os.path.join(OPENPOSE_PATH, "model", "hand_pose_model.pth")
@@ -217,7 +219,7 @@ class PoseDetectorNode:
         self.task_complete = True
         rospy.loginfo(f"--- STABLE POSE DETECTED: '{label}' ---")
         try:
-            output_path = os.path.join(SCRIPT_DIR, OUTPUT_FILENAME)
+            output_path = os.path.join(self.src_dir, OUTPUT_FILENAME)
             with open(output_path, 'w') as f:
                 f.write(label)
             rospy.loginfo(f"Successfully wrote '{label}' to '{output_path}'.")

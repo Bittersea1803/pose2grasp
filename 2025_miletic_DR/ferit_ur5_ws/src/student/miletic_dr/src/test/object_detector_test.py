@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3More actions
 # -*- coding: utf-8 -*-
 
 import os
@@ -20,6 +20,9 @@ from tf.transformations import quaternion_from_matrix
 GRIPPER_MESH_PATH = "mesh.ply"
 
 # --- ROS Topici - HOME ---
+CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
+CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
+CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
 # CAMERA_RGB_TOPIC = "/camera/rgb/image_rect_color"
 # CAMERA_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
 # CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
@@ -38,7 +41,7 @@ class ObjectDetectorLogic:
         self.fy = camera_intrinsics.K[4]
         self.cx = camera_intrinsics.K[2]
         self.cy = camera_intrinsics.K[5]
-        
+
         self.VOXEL_SIZE = 0.005
         self.PLANE_DIST_THRESHOLD = 0.015
         self.DBSCAN_EPS = 0.025
@@ -107,14 +110,14 @@ class ObjectDetectorLogic:
             plane_normal = np.array(plane_model[:3])
             if np.dot(plane_normal, -plane_cloud.get_center()) < 0: plane_normal = -plane_normal
             z_axis = plane_normal / np.linalg.norm(plane_normal)
-            
+
             # Pomoćna rotacija za transformaciju u 2D
             ref_vec = np.array([1., 0., 0.]);
             if np.abs(np.dot(z_axis, ref_vec)) > 0.95: ref_vec = np.array([0., 1., 0.])
             y_axis_temp = np.cross(z_axis, ref_vec); y_axis_temp /= np.linalg.norm(y_axis_temp)
             x_axis_temp = np.cross(y_axis_temp, z_axis); x_axis_temp /= np.linalg.norm(x_axis_temp)
             R_world_to_plane_temp = np.stack([x_axis_temp, y_axis_temp, z_axis], axis=0)
-            
+
             transformed_points = (R_world_to_plane_temp @ np.asarray(largest_cluster.points).T).T
             points_2d = transformed_points[:, :2].astype(np.float32)
             rect_2d = cv2.minAreaRect(points_2d)
@@ -135,28 +138,28 @@ class ObjectDetectorLogic:
             # Finalna rotacija i pozicija objekta
             R_plane_to_world = R_world_to_plane_temp.T
             final_rotation = R_plane_to_world @ R_on_plane
-            
+
             plane_level_z = np.mean((R_world_to_plane_temp @ np.asarray(plane_cloud.points).T).T[:, 2])
             max_z = np.max(transformed_points[:, 2])
             extent = np.array([obb_extent_2d[0], obb_extent_2d[1], max_z - plane_level_z])
             center_in_plane_coords = np.array([center_2d[0], center_2d[1], plane_level_z + extent[2] / 2])
             center_world = R_plane_to_world @ center_in_plane_coords
-            
+
             final_obb = o3d.geometry.OrientedBoundingBox(center_world, final_rotation, extent)
         else:
             final_obb = largest_cluster.get_oriented_bounding_box()
             z_axis = np.array([0, 0, 1])
-        
+
         rospy.loginfo("\n" + "="*30 + "\n--- METRIKA DETEKCIJE ---")
         rospy.loginfo(f"Centar objekta: {np.round(final_obb.get_center(), 3)}")
         rospy.loginfo(f"Dimenzije (X, Y, Z): {np.round(final_obb.extent, 3)}")
         rospy.loginfo(f"Rotacijska matrica objekta:\n{np.round(final_obb.R, 2)}")
-        
+
         largest_cluster.paint_uniform_color([0, 0.4, 0.8])
         geometries_to_draw.append(largest_cluster)
         final_obb.color = (0, 1, 0)
         geometries_to_draw.append(final_obb)
-        
+
         # KS objekta
         object_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.08)
         obb_transform = np.identity(4)
@@ -164,7 +167,7 @@ class ObjectDetectorLogic:
         obb_transform[:3, 3] = final_obb.get_center()
         object_frame.transform(obb_transform)
         geometries_to_draw.append(object_frame)
-        
+
         # KS ravnine
         if plane_detected:
             plane_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0,0,0])
@@ -177,7 +180,7 @@ class ObjectDetectorLogic:
         # Pozicioniranje hvataljke
         if self.gripper_mesh_loaded:
             gripper_vis = o3d.geometry.TriangleMesh(self.gripper_mesh)
-            
+
             # Orijentacija hvataljke
             gripper_z = -z_axis
             gripper_y = final_obb.R[:, 1]
@@ -187,7 +190,7 @@ class ObjectDetectorLogic:
             # Pozicija hvataljke
             box_up_vector = final_obb.R[:, 2]
             gripper_position = final_obb.get_center() + box_up_vector * (final_obb.extent[2] / 2 + 0.03)
-            
+
             # Primjena transformacije
             gripper_transform = np.identity(4)
             gripper_transform[:3, :3] = gripper_rotation
@@ -213,7 +216,7 @@ class ObjectDetectorLogic:
         transform_for_quat[:3,:3] = final_obb.R
         quat = quaternion_from_matrix(transform_for_quat)
         pose_msg.pose.orientation.x, pose_msg.pose.orientation.y, pose_msg.pose.orientation.z, pose_msg.pose.orientation.w = quat
-        
+
         status = f"Pronađen objekt. BBox na Z={final_obb.get_center()[2]:.2f}m"
         return pose_msg, status, geometries_to_draw
 
@@ -288,8 +291,5 @@ class ObjectDetectorGUI:
         self.root.mainloop()
 
 if __name__ == '__main__':
-    try:
-        app = ObjectDetectorGUI()
-        app.run()
-    except Exception as e:
-        rospy.logfatal(f"Unhandled exception: {e}")
+    app = ObjectDetectorGUI()
+    app.run()

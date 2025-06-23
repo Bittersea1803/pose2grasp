@@ -13,19 +13,21 @@ from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 from core.real_ur5_controller import UR5Controller
 
+# --- ROS Topics ---
 CAMERA_RGB_TOPIC = "/camera/color/image_raw"
 CAMERA_DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw"
 CAMERA_INFO_TOPIC = "/camera/color/camera_info"
 OUTPUT_FILENAME = "object_data.json"
 
-SCAN_POSE_JOINTS = np.deg2rad([-91.13, -98.58, -22.66, -143.08, 92.83, 45.45])
+# --- Robot Pose & Detection Parameters ---
+SCAN_POSE_JOINTS = np.deg2rad([-89.35, -102.64, -22.66, -143.08, 92.83, 45.45])
 
-VOXEL_SIZE = 0.005              
-PLANE_DIST_THRESHOLD = 0.015    
-DBSCAN_EPS = 0.025              
-DBSCAN_MIN_POINTS = 50          
-DEPTH_RANGE_MIN = 0.4           
-DEPTH_RANGE_MAX = 2.0           
+VOXEL_SIZE = 0.005
+PLANE_DIST_THRESHOLD = 0.015  
+DBSCAN_EPS = 0.025            
+DBSCAN_MIN_POINTS = 50        
+DEPTH_RANGE_MIN = 0.4         
+DEPTH_RANGE_MAX = 2.0         
 
 class ObjectDetectorLogic:
     def __init__(self, camera_intrinsics):
@@ -36,6 +38,7 @@ class ObjectDetectorLogic:
         rospy.loginfo("ObjectDetectorLogic initialized with camera intrinsics.")
 
     def create_pcd_from_rgbd(self, rgb_image, depth_image):
+        """Creates an Open3D PointCloud from RGB and Depth images."""
         depth_16u = np.asarray(depth_image)
         rgb_bgr = np.asarray(rgb_image)
         
@@ -68,66 +71,101 @@ class ObjectDetectorLogic:
 
         pcd_down = pcd.voxel_down_sample(VOXEL_SIZE)
         rospy.loginfo(f"Point cloud downsampled to {len(pcd_down.points)} points.")
-        
-        #   1. Plane Segmentation  
+
+        plane_detected = False
         try:
             plane_model, inliers = pcd_down.segment_plane(PLANE_DIST_THRESHOLD, 3, 1000)
-            plane_cloud = pcd_down.select_by_index(inliers)
-            objects_cloud = pcd_down.select_by_index(inliers, invert=True)
-            plane_detected = True
-            rospy.loginfo(f"Plane detected with {len(inliers)} inlier points. {len(objects_cloud.points)} object points remaining.")
+            if len(inliers) > DBSCAN_MIN_POINTS:
+                plane_detected = True
+                plane_cloud = pcd_down.select_by_index(inliers)
+                objects_cloud = pcd_down.select_by_index(inliers, invert=True)
+                rospy.loginfo(f"Plane detected with {len(inliers)} inlier points. {len(objects_cloud.points)} object points remaining.")
+            else:
+                objects_cloud = pcd_down
+                rospy.logwarn("Plane detection found insufficient points, treating entire cloud as objects.")
         except RuntimeError:
             objects_cloud = pcd_down
-            plane_detected = False
             rospy.logwarn("Plane segmentation failed, treating entire cloud as objects.")
 
         if not objects_cloud.has_points():
             rospy.logwarn("No object points remaining after plane removal.")
             return None
 
-        #   2. Clustering  
         labels = np.array(objects_cloud.cluster_dbscan(DBSCAN_EPS, DBSCAN_MIN_POINTS, print_progress=False))
-        if labels.max() < 0:
+        max_label = labels.max()
+        if max_label < 0:
             rospy.logwarn("DBSCAN found no valid clusters meeting the size requirement.")
             return None
-
-        counts = np.bincount(labels[labels >= 0])
-        largest_cluster_label = np.argmax(counts)
-        largest_cluster = objects_cloud.select_by_index(np.where(labels == largest_cluster_label)[0])
-        rospy.loginfo(f"Found {labels.max() + 1} clusters. Largest has {len(largest_cluster.points)} points.")
-
-        #   3. Bounding Box Calculation  
-        obb = largest_cluster.get_oriented_bounding_box()
         
-        #   4. Axis Alignment for Consistency  
-        # Ensure the Z-axis of the box points "up" (away from the table).
+        valid_clusters = [objects_cloud.select_by_index(np.where(labels == i)[0]) for i in range(max_label + 1)]
+        valid_clusters.sort(key=lambda x: len(x.points), reverse=True)
+        largest_cluster = valid_clusters[0]
+        rospy.loginfo(f"Largest valid cluster has {len(largest_cluster.points)} points.")
+
         if plane_detected:
             plane_normal = np.array(plane_model[:3])
             if np.dot(plane_normal, -plane_cloud.get_center()) < 0:
                 plane_normal = -plane_normal
+            z_axis = plane_normal / np.linalg.norm(plane_normal)
             
-            if np.dot(obb.R[:, 2], plane_normal) < 0:
-                rospy.loginfo("Aligning Axes: OBB Z-axis was pointing down, flipping it.")
-                obb.R[:, 2] = -obb.R[:, 2]
-                obb.R[:, 1] = -obb.R[:, 1]
-        
-        # Ensure the Y-axis corresponds to the longest side of the object base.
-        if obb.extent[0] > obb.extent[1]:
-            rospy.loginfo("Aligning Axes: Swapping X and Y to make Y the longest dimension.")
-            x_axis, y_axis = obb.R[:, 0].copy(), obb.R[:, 1].copy()
-            obb.R[:, 0], obb.R[:, 1] = y_axis, x_axis
-            obb.extent[0], obb.extent[1] = obb.extent[1], obb.extent[0]
+            ref_vec = np.array([1., 0., 0.])
+            if np.abs(np.dot(z_axis, ref_vec)) > 0.95:
+                ref_vec = np.array([0., 1., 0.])
+            y_axis_temp = np.cross(z_axis, ref_vec); y_axis_temp /= np.linalg.norm(y_axis_temp)
+            x_axis_temp = np.cross(y_axis_temp, z_axis); x_axis_temp /= np.linalg.norm(x_axis_temp)
+            R_world_to_plane_temp = np.stack([x_axis_temp, y_axis_temp, z_axis], axis=0)
+            
+            transformed_points = (R_world_to_plane_temp @ np.asarray(largest_cluster.points).T).T
+            points_2d = transformed_points[:, :2].astype(np.float32)
+            rect_2d = cv2.minAreaRect(points_2d)
+            center_2d, (width, height), angle_deg = rect_2d
 
-        center = obb.get_center()
-        rotation_matrix = obb.R
-        dimensions = obb.extent
-        
-        rospy.loginfo("  DETECTED OBJECT PROPERTIES  ")
-        rospy.loginfo(f"Center (m):          {np.round(center, 4)}")
+            if width < height:
+                angle_for_y_axis_deg, obb_extent_2d = angle_deg, [width, height]
+            else:
+                angle_for_y_axis_deg, obb_extent_2d = angle_deg + 90, [height, width]
+
+            angle_rad = np.deg2rad(angle_for_y_axis_deg)
+            c, s = np.cos(angle_rad), np.sin(angle_rad)
+            R_on_plane = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+            R_plane_to_world = R_world_to_plane_temp.T
+            final_rotation = R_plane_to_world @ R_on_plane
+            
+            plane_level_z = np.mean((R_world_to_plane_temp @ np.asarray(plane_cloud.points).T).T[:, 2])
+            max_z = np.max(transformed_points[:, 2])
+            
+            height_z = abs(max_z - plane_level_z)
+            dimensions = np.array([obb_extent_2d[0], obb_extent_2d[1], height_z])
+
+            center_in_plane_coords = np.array([center_2d[0], center_2d[1], plane_level_z + dimensions[2] / 2])
+            center = R_plane_to_world @ center_in_plane_coords
+            
+            # --- START: IMPLEMENTACIJA ISPRAVKA ---
+            # Kreiramo konačni Open3D OBB objekt. Ovaj korak stabilizira rezultate i osigurava
+            # da su centar, rotacija i dimenzije geometrijski konzistentni.
+            final_obb = o3d.geometry.OrientedBoundingBox(center, final_rotation, dimensions)
+
+            # Očitavamo konačne, ispravljene vrijednosti iz OBB objekta.
+            center = final_obb.get_center()
+            final_rotation = final_obb.R
+            dimensions = final_obb.extent
+            # --- END: IMPLEMENTACIJA ISPRAVKA ---
+
+        else:
+            # Fallback na jednostavni OBB ako ravnina nije pronađena (ovo je već bilo ispravno)
+            rospy.logwarn("Using simple OBB calculation because no plane was detected.")
+            obb = largest_cluster.get_oriented_bounding_box()
+            center = obb.get_center()
+            final_rotation = obb.R
+            dimensions = obb.extent
+
+        rospy.loginfo("  --- DETECTED OBJECT PROPERTIES ---  ")
+        rospy.loginfo(f"Center (m):           {np.round(center, 4)}")
         rospy.loginfo(f"Dimensions (X,Y,Z m): {np.round(dimensions, 4)}")
-        rospy.loginfo(f"Rotation Matrix:\n{np.round(rotation_matrix, 3)}")
+        rospy.loginfo(f"Rotation Matrix:\n{np.round(final_rotation, 3)}")
         
-        return center, rotation_matrix, dimensions
+        return center, final_rotation, dimensions
 
 class ObjectDetectorNode:
     def __init__(self):
@@ -140,16 +178,17 @@ class ObjectDetectorNode:
         self.task_complete = False
 
     def run(self):
-        # 1. Move robot to SCAN position
         rospy.loginfo("Step 1: Moving robot to SCAN_POSE for object detection.")
         joint_trajectory_points = np.array([
             self.robot_controller.get_current_joint_values(), 
             SCAN_POSE_JOINTS
         ])
-        self.robot_controller.send_joint_trajectory_action(joint_points=joint_trajectory_points)
+        self.robot_controller.send_joint_trajectory_action(joint_points=joint_trajectory_points )
         rospy.loginfo("Robot is at SCAN_POSE.")
+        
+        rospy.loginfo("Getting robot pose at scan location...")
+        T_B_6_scan = self.robot_controller.get_current_tool_pose()
 
-        # 2. Get camera info first
         try:
             rospy.loginfo("Step 2: Waiting for camera info...")
             cam_info = rospy.wait_for_message(CAMERA_INFO_TOPIC, CameraInfo, timeout=10)
@@ -158,7 +197,6 @@ class ObjectDetectorNode:
             rospy.logfatal("Timeout waiting for camera_info. Is the camera running?")
             return
 
-        # 3. Get a single pair of synced images
         try:
             rospy.loginfo("Step 3: Waiting for a synchronized RGB and Depth image pair...")
             rgb_msg = rospy.wait_for_message(CAMERA_RGB_TOPIC, Image, timeout=10)
@@ -169,7 +207,6 @@ class ObjectDetectorNode:
             
         rospy.loginfo("Image pair received. Starting detection...")
 
-        # 4. Process the images
         try:
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
             depth_image = self.bridge.imgmsg_to_cv2(depth_msg, "16UC1")
@@ -178,26 +215,32 @@ class ObjectDetectorNode:
             return
             
         pcd = self.logic.create_pcd_from_rgbd(rgb_image, depth_image)
+        if pcd is None:
+             rospy.logerr("Object detection failed because point cloud could not be created.")
+             rospy.signal_shutdown("Point cloud creation failed.")
+             return
+
         result = self.logic.find_largest_object_data(pcd)
 
-        # 5. Save results and shutdown
         if result:
             center, rotation_matrix, dimensions = result
-            self.write_result_and_shutdown(center, rotation_matrix, dimensions)
+            self.write_result_and_shutdown(center, rotation_matrix, dimensions, T_B_6_scan)
         else:
             rospy.logerr("Object detection failed. No result to save. Shutting down.")
             rospy.signal_shutdown("Object detection failed.")
     
-    def write_result_and_shutdown(self, center, rotation_matrix, dimensions):
+    def write_result_and_shutdown(self, center, rotation_matrix, dimensions, T_B_6_scan):
+        """Saves all detection results to the JSON file."""
         if self.task_complete: return
         self.task_complete = True
         
-        rospy.loginfo(f"  OBJECT DETECTED  ")
+        rospy.loginfo(f"  --- OBJECT DETECTED ---  ")
         
         output_data = {
             "center": center.tolist(),
             "rotation_matrix": rotation_matrix.tolist(),
-            "dimensions": dimensions.tolist()
+            "dimensions": dimensions.tolist(),
+            "T_B_6_scan": T_B_6_scan.tolist()
         }
 
         try:

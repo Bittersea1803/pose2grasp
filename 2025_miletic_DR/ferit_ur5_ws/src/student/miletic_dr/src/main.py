@@ -36,7 +36,6 @@ class GraspExecutor:
             sys.exit(1)
         self.robot_controller = UR5Controller()
         rospy.loginfo("UR5 Controller initialized.")
-        # Activate the gripper when the node starts
         self.robot_controller.activate_gripper()
 
     def run(self):
@@ -58,7 +57,7 @@ class GraspExecutor:
         self._execute_grasp_motion(poses, pose_type)
         rospy.loginfo("Step 4: Grasp attempt finished. Moving back to HOME pose.")
         self.move_to_home_pose()
-        self.robot_controller.send_gripper_command("basic", position=0)  # Ensure gripper is open
+        self.robot_controller.send_gripper_command("basic", position=0
         rospy.loginfo("--- Grasp Execution Sequence Complete ---")
         rospy.signal_shutdown("Task complete.")
 
@@ -82,21 +81,14 @@ class GraspExecutor:
         if self.grasp.lower() == "scissor":
             self.T_TCP_6 = self.T_TCP_6_scissor.copy()
             rospy.loginfo("Using scissor gripper configuration.")
-
-            # Matrica rotacije od 90 stupnjeva oko Z osi (ugrađena direktno)
             R_z_90 = np.array([
                 [0, -1, 0],
                 [1,  0, 0],
                 [0,  0, 1]
             ])
-
-            # Stvaranje homogene transformacijske matrice za rotaciju
-            # Inicijalno 4x4 jedinična matrica
             T_rot_z_90 = np.eye(4)
-            # Postavljanje matrice rotacije u gornji lijevi 3x3 dio
             T_rot_z_90[:3, :3] = R_z_90
 
-            # Dodaj rotaciju od 90 stupnjeva oko Z (TCP-a)
             self.T_TCP_6 = self.T_TCP_6 @ T_rot_z_90
         else:
             self.T_TCP_6 = self.T_TCP_6
@@ -110,22 +102,20 @@ class GraspExecutor:
     
     def _execute_grasp_motion(self, poses, pose_type):
         rospy.loginfo("--- Starting physical grasp motion ---")
-        # Open the gripper before moving to the object
         self.robot_controller.send_gripper_command(pose_type, position=0) 
-        rospy.sleep(1.0) # Give gripper time to open
+        rospy.sleep(1.0)
         
         rospy.loginfo("Moving directly to GRASP pose.")
         if not self._move_to_goal(poses["grasp"], "GRASP"): 
             rospy.logerr("Failed to move to GRASP pose.")
             return
-
         # Close the gripper to grasp the object
         self.robot_controller.send_gripper_command(pose_type, position=255) 
-        rospy.sleep(2.0) # Wait for gripper to close
+        rospy.sleep(2.0)
 
         # Lift the object
         T_B_6_lift = poses["grasp"].copy()
-        T_B_6_lift[2, 3] += 0.15 # Z + 15cm
+        T_B_6_lift[2, 3] += 0.15
         self._move_to_goal(T_B_6_lift, "LIFT")
 
         rospy.loginfo("--- Grasp motion sequence finished successfully! ---")
@@ -133,23 +123,18 @@ class GraspExecutor:
     def _calculate_target_tcp_pose(self, T_B_O, dims, pose_type):
         R_B_O = T_B_O[:3, :3]
         target_position = T_B_O[:3, 3].copy()
-            
-        rospy.loginfo("Calculating orientation for the gripper based on 'NO Y on Y' rule.")
         
-        # The object's axes are:
         # R_B_O[:, 0] = Object's X-axis (short side)
         # R_B_O[:, 1] = Object's Y-axis (long side)
         # R_B_O[:, 2] = Object's Z-axis (pointing up)
 
-        # 1. Define Gripper's approach vector (Z-axis). This is correct.
+        # 1. Define Gripper's approach vector (Z-axis)
         gripper_z_axis = -R_B_O[:, 2]
 
         # 2. Define Gripper's finger alignment (Y-axis) to align with the object's SHORT side (X-axis).
-        # This is the direct implementation of your instruction.
         gripper_y_axis = R_B_O[:, 0]
 
         # 3. Define the Gripper's perpendicular axis (X-axis) using the cross product
-        # to ensure a valid, right-handed coordinate frame.
         gripper_x_axis = np.cross(gripper_y_axis, gripper_z_axis)
         
         # Normalize axes to ensure a valid rotation matrix

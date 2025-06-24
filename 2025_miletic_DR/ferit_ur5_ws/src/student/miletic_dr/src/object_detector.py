@@ -19,7 +19,6 @@ CAMERA_DEPTH_TOPIC = "/camera/aligned_depth_to_color/image_raw"
 CAMERA_INFO_TOPIC = "/camera/color/camera_info"
 OUTPUT_FILENAME = "object_data.json"
 
-# --- Robot Pose & Detection Parameters ---
 SCAN_POSE_JOINTS = np.deg2rad([-89.35, -102.64, -22.66, -143.08, 92.83, 45.45])
 
 VOXEL_SIZE = 0.005
@@ -141,19 +140,13 @@ class ObjectDetectorLogic:
             center_in_plane_coords = np.array([center_2d[0], center_2d[1], plane_level_z + dimensions[2] / 2])
             center = R_plane_to_world @ center_in_plane_coords
             
-            # --- START: IMPLEMENTACIJA ISPRAVKA ---
-            # Kreiramo konačni Open3D OBB objekt. Ovaj korak stabilizira rezultate i osigurava
-            # da su centar, rotacija i dimenzije geometrijski konzistentni.
             final_obb = o3d.geometry.OrientedBoundingBox(center, final_rotation, dimensions)
 
-            # Očitavamo konačne, ispravljene vrijednosti iz OBB objekta.
             center = final_obb.get_center()
             final_rotation = final_obb.R
             dimensions = final_obb.extent
-            # --- END: IMPLEMENTACIJA ISPRAVKA ---
 
         else:
-            # Fallback na jednostavni OBB ako ravnina nije pronađena (ovo je već bilo ispravno)
             rospy.logwarn("Using simple OBB calculation because no plane was detected.")
             obb = largest_cluster.get_oriented_bounding_box()
             center = obb.get_center()

@@ -11,3 +11,8 @@
 !2025_miletic_DR/ferit_ur5_ws/src/core/src/
 !2025_miletic_DR/ferit_ur5_ws/src/core/src/core/
 !2025_miletic_DR/ferit_ur5_ws/src/core/src/core/real_ur5_controller.py
+
+!2025_miletic_DR/docker/
+!2025_miletic_DR/docker/Dockerfile
+!2025_miletic_DR/docker/build_docker.sh
+!2025_miletic_DR/docker/run_docker.sh

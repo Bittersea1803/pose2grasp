@@ -57,7 +57,7 @@ class GraspExecutor:
         self._execute_grasp_motion(poses, pose_type)
         rospy.loginfo("Step 4: Grasp attempt finished. Moving back to HOME pose.")
         self.move_to_home_pose()
-        self.robot_controller.send_gripper_command("basic", position=0
+        self.robot_controller.send_gripper_command("basic", position=0)
         rospy.loginfo("--- Grasp Execution Sequence Complete ---")
         rospy.signal_shutdown("Task complete.")
 

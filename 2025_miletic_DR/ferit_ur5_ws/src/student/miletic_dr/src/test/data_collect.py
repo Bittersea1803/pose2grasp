@@ -26,17 +26,25 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# --- Path Configuration ---
 def get_project_root():
-    """Finds the project's root directory automatically."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # test -> src -> miletic_dr
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 PROJECT_ROOT = get_project_root()
-OPENPOSE_PYTHON_PATH = os.path.join(PROJECT_ROOT, "src", "pytorch-openpose")
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+
+OPENPOSE_PYTHON_PATH = os.path.join(PROJECT_ROOT, "pytorch-openpose")
 OPENPOSE_MODEL_DIR = os.path.join(OPENPOSE_PYTHON_PATH, "model")
 
-# --- OpenPose Import ---
+DATA_DIR = os.path.join(PROJECT_ROOT, "src", "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+CSV_FILENAME = "collected_hand_poses.csv"
+CSV_FULL_PATH = os.path.join(DATA_DIR, CSV_FILENAME)
+
+print("OPENPOSE_PYTHON_PATH =", OPENPOSE_PYTHON_PATH)
+print("Expect =", os.path.join(OPENPOSE_PYTHON_PATH, "src", "hand.py"))
+print("CSV_FULL_PATH =", CSV_FULL_PATH)
+
 try:
     if not os.path.isdir(OPENPOSE_PYTHON_PATH):
         raise ImportError(f"OpenPose Python path not found at: {OPENPOSE_PYTHON_PATH}")
@@ -47,7 +55,6 @@ except ImportError as e:
     rospy.logfatal(f"Cannot import OpenPose. Check path and installation. Error: {e}")
     sys.exit(1)
 
-# --- Main Constants ---
 RGB_TOPIC_RAW = "/camera/rgb/image_color"
 RGB_TOPIC_RECT_COLOR = "/camera/rgb/image_rect_color"
 RGB_TOPIC_OPTIONS = {
@@ -58,7 +65,7 @@ RGB_TOPIC_OPTIONS = {
 REGISTERED_DEPTH_TOPIC = "/camera/depth_registered/hw_registered/image_rect_raw"
 CAMERA_INFO_TOPIC = "/camera/rgb/camera_info"
 
-CSV_FILENAME = "collected_hand_poses.csv" # Unified CSV filename
+CSV_FILENAME = "collected_hand_poses.csv"
 CSV_FULL_PATH = os.path.join(DATA_DIR, CSV_FILENAME)
 
 VALID_DEPTH_THRESHOLD_MM = (400, 1500)
@@ -91,7 +98,6 @@ LIMB_COLORS = [ # Colors for drawing hand connections
 VALID_POINT_COLOR = (0, 255, 0)
 INVALID_POINT_COLOR = (0, 0, 255)
 
-# --- Data Classes ---
 @dataclass
 class PendingCaptureMetadata:
     timestamp: Optional[str] = None
@@ -393,32 +399,28 @@ class DepthHandCollector:
                     p1 = points_filtered[p1_idx]
                     p2 = points_filtered[p2_idx]
                     
-                    # Check if points are still valid (not NaNs introduced by previous removals in the same pass)
                     if np.isnan(p1).any() or np.isnan(p2).any():
                         continue
 
                     dist_sq = np.sum((p1 - p2)**2)
                     
                     if dist_sq > MAX_LIMB_LENGTH_M**2:
-                        # Anomaly detected: this limb is too long.
-                        # Invalidate the point that is further from the origin (assumed to be the wrist
-                        # if coordinates are relative, or camera origin otherwise).
                         dist_p1_sq_from_origin = np.sum(p1**2)
                         dist_p2_sq_from_origin = np.sum(p2**2)
                         
                         if dist_p1_sq_from_origin > dist_p2_sq_from_origin:
-                            if new_validity_mask[p1_idx]: # Only act if it's currently considered valid
+                            if new_validity_mask[p1_idx]:
                                 points_filtered[p1_idx] = np.nan
                                 new_validity_mask[p1_idx] = False
                                 num_removed_in_pass += 1
-                        else: # p2 is further or they are equidistant (invalidate p2 by default)
-                            if new_validity_mask[p2_idx]: # Only act if it's currently considered valid
+                        else: 
+                            if new_validity_mask[p2_idx]: 
                                 points_filtered[p2_idx] = np.nan
                                 new_validity_mask[p2_idx] = False
                                 num_removed_in_pass += 1
             
             if num_removed_in_pass == 0:
-                break # No changes in this pass, stable state reached
+                break 
         
         if iteration == MAX_ITERATIONS - 1 and num_removed_in_pass > 0:
             rospy.logwarn_throttle(10, f"Limb length filter reached max iterations ({MAX_ITERATIONS}) and still making changes.")

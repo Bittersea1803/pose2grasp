@@ -122,7 +122,17 @@ class GraspExecutor:
 
     def _calculate_target_tcp_pose(self, T_B_O, dims, pose_type):
         R_B_O = T_B_O[:3, :3]
-        target_position = T_B_O[:3, 3].copy()
+        center_B = T_B_O[:3, 3].copy()
+        h = float(dims[2])        # height of an object
+    
+        FINGER_LEN = 0.015        # mm
+        MARGIN = 0.05             # 5 cm margin height - TCP height
+    
+        if h > MARGIN:
+            offset = max(0.0, (h * 0.5 - FINGER_LEN))
+            target_position = center_B + R_B_O[:, 2] * offset
+        else:
+            target_position = center_B
         
         # R_B_O[:, 0] = Object's X-axis (short side)
         # R_B_O[:, 1] = Object's Y-axis (long side)
